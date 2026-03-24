@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Layout } from './components/Layout';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ToastProvider } from './components/Toast';
 import { lazy, Suspense } from 'react';
 import { LoadingSpinner } from './components/LoadingSpinner';
 import { useConfigStatus } from './api/hooks';
@@ -9,6 +10,7 @@ import { useConfigStatus } from './api/hooks';
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Holdings = lazy(() => import('./pages/Holdings'));
 const Analysis = lazy(() => import('./pages/Analysis'));
+const AnalysisProgress = lazy(() => import('./pages/AnalysisProgress'));
 const Recommendations = lazy(() => import('./pages/Recommendations'));
 const History = lazy(() => import('./pages/History'));
 const Setup = lazy(() => import('./pages/Setup'));
@@ -80,6 +82,14 @@ function AppRoutes() {
             }
           />
           <Route
+            path="analysis/progress/:jobId"
+            element={
+              <Suspense fallback={<LoadingSpinner />}>
+                <AnalysisProgress />
+              </Suspense>
+            }
+          />
+          <Route
             path="recommendations"
             element={
               <Suspense fallback={<LoadingSpinner />}>
@@ -105,11 +115,13 @@ function AppRoutes() {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <ErrorBoundary>
-        <BrowserRouter>
-          <AppRoutes />
-        </BrowserRouter>
-      </ErrorBoundary>
+      <ToastProvider>
+        <ErrorBoundary>
+          <BrowserRouter>
+            <AppRoutes />
+          </BrowserRouter>
+        </ErrorBoundary>
+      </ToastProvider>
     </QueryClientProvider>
   );
 }

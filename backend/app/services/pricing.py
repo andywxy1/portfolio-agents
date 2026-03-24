@@ -218,10 +218,11 @@ def _cache_entry_to_response(entry: PriceCache, stale: bool = False) -> PriceDat
 def get_price(db: Session, ticker: str) -> PriceDataResponse:
     """Get the current price for a ticker, using cache with TTL.
 
+    Never raises. Returns a PriceDataResponse in all cases:
     1. Check cache -- if fresh, return cached data.
     2. Fetch from Alpaca -- if successful, cache and return.
     3. Fall back to stale cache with stale=True flag.
-    4. If no data at all, raise an error.
+    4. If no data at all, return price=None with stale=True.
     """
     ticker = ticker.upper()
 
@@ -241,29 +242,71 @@ def get_price(db: Session, ticker: str) -> PriceDataResponse:
         logger.info("Serving stale cached price for %s", ticker)
         return _cache_entry_to_response(cached, stale=True)
 
-    # 4. No data available
-    from fastapi import HTTPException
-    raise HTTPException(
-        status_code=503,
-        detail={
-            "error": {
-                "code": "PRICE_UNAVAILABLE",
-                "message": f"No price data available for {ticker}. Configure Alpaca API keys or wait for data.",
-            }
-        },
+    # 4. No data available -- return null price with stale flag
+    logger.warning("No price data available for %s (no cache, no Alpaca)", ticker)
+    return PriceDataResponse(
+        ticker=ticker,
+        price=None,
+        fetched_at=None,
+        stale=True,
     )
 
 
-def get_prices_batch(db: Session, tickers: list[str]) -> dict[str, PriceDataResponse | None]:
+def validate_ticker(ticker: str) -> dict:
+    """Check if a ticker is valid on Alpaca. Returns {valid, name?, exchange?}.
+
+    Never raises -- returns {valid: False} on any failure.
+    """
+    ticker = ticker.upper()
+
+    if not settings.alpaca_api_key or not settings.alpaca_secret_key:
+        logger.warning("Alpaca credentials not configured; cannot validate ticker %s", ticker)
+        return {"valid": False}
+
+    try:
+        from alpaca.trading.client import TradingClient
+        from alpaca.trading.requests import GetAssetsRequest
+        from alpaca.trading.enums import AssetClass
+
+        client = TradingClient(
+            api_key=settings.alpaca_api_key,
+            secret_key=settings.alpaca_secret_key,
+            paper=True,
+        )
+
+        asset = client.get_asset(ticker)
+        if asset and asset.tradable:
+            return {
+                "valid": True,
+                "name": asset.name,
+                "exchange": str(asset.exchange) if asset.exchange else None,
+            }
+        return {"valid": False}
+
+    except ImportError:
+        logger.error("alpaca-py not installed; cannot validate ticker")
+        return {"valid": False}
+    except Exception:
+        logger.debug("Ticker validation failed for %s", ticker, exc_info=True)
+        return {"valid": False}
+
+
+def get_prices_batch(db: Session, tickers: list[str]) -> dict[str, PriceDataResponse]:
     """Get prices for multiple tickers. Returns a dict keyed by ticker.
 
-    Non-fatal: if a ticker price is unavailable, its value is None.
+    Never raises. If a ticker price is unavailable, returns a response
+    with price=None and stale=True.
     """
-    results: dict[str, PriceDataResponse | None] = {}
+    results: dict[str, PriceDataResponse] = {}
     for ticker in tickers:
         try:
             results[ticker.upper()] = get_price(db, ticker)
         except Exception:
             logger.warning("Could not fetch price for %s", ticker)
-            results[ticker.upper()] = None
+            results[ticker.upper()] = PriceDataResponse(
+                ticker=ticker.upper(),
+                price=None,
+                fetched_at=None,
+                stale=True,
+            )
     return results

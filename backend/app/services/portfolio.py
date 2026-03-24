@@ -133,7 +133,7 @@ def compute_portfolio_summary(
 
     for h in holdings:
         price_data = prices.get(h.ticker.upper())
-        current_price = price_data.price if price_data else None
+        current_price = price_data.price if price_data and price_data.price is not None else None
         cost_basis = h.shares * h.buy_price
         market_value = h.shares * current_price if current_price is not None else None
         pnl = (market_value - cost_basis) if market_value is not None else None
@@ -256,7 +256,7 @@ def get_holdings_with_prices(
     position_values: list[float] = []
     for h in holdings:
         price_data = prices.get(h.ticker.upper())
-        current_price = price_data.price if price_data else None
+        current_price = price_data.price if price_data and price_data.price is not None else None
         if current_price is not None:
             val = h.shares * current_price
         else:
@@ -267,7 +267,7 @@ def get_holdings_with_prices(
     result: list[HoldingWithPrice] = []
     for i, h in enumerate(holdings):
         price_data = prices.get(h.ticker.upper())
-        current_price = price_data.price if price_data else None
+        current_price = price_data.price if price_data and price_data.price is not None else None
         cost_basis = h.shares * h.buy_price
         market_value = h.shares * current_price if current_price is not None else None
         pnl = (market_value - cost_basis) if market_value is not None else None

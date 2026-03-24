@@ -8,18 +8,36 @@ const navItems = [
   { to: '/history', label: 'History', icon: HistoryIcon },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  onClose?: () => void;
+}
+
+export function Sidebar({ onClose }: SidebarProps) {
   return (
-    <aside className="flex w-64 flex-col bg-slate-900 text-slate-300">
+    <aside className="flex h-full w-64 flex-col bg-slate-900 text-slate-300">
       {/* Brand */}
-      <div className="flex items-center gap-3 px-6 py-5 border-b border-slate-700/50">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400 font-bold text-lg">
-          P
+      <div className="flex items-center justify-between px-6 py-5 border-b border-slate-700/50">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400 font-bold text-lg">
+            P
+          </div>
+          <div>
+            <h1 className="text-sm font-semibold text-white leading-tight">Portfolio Agents</h1>
+            <p className="text-xs text-slate-500">AI-Powered Analysis</p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-sm font-semibold text-white leading-tight">Portfolio Agents</h1>
-          <p className="text-xs text-slate-500">AI-Powered Analysis</p>
-        </div>
+        {/* Close button for mobile (Item 18) */}
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors lg:hidden"
+            aria-label="Close sidebar"
+          >
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Navigation */}
@@ -38,7 +56,7 @@ export function Sidebar() {
             }
           >
             <Icon className="h-5 w-5 flex-shrink-0" />
-            {label}
+            <span className="truncate">{label}</span>
           </NavLink>
         ))}
       </nav>
@@ -56,7 +74,7 @@ export function Sidebar() {
           }
         >
           <SettingsIcon className="h-5 w-5 flex-shrink-0" />
-          Settings
+          <span className="truncate">Settings</span>
         </NavLink>
       </div>
       <div className="border-t border-slate-700/50 px-6 py-4">

@@ -1,8 +1,10 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAnalysisHistory, usePnlHistory } from '../../api/hooks';
-import { LoadingSpinner } from '../../components/LoadingSpinner';
+import { SkeletonChart, Skeleton } from '../../components/Skeleton';
 import { EmptyState } from '../../components/EmptyState';
 import { JobStatusBadge, SignalBadge } from '../../components/StatusBadge';
+import { usePageTitle } from '../../hooks/usePageTitle';
 import { formatDate, formatDateTime, formatRelativeTime, formatCurrency, formatPnl } from '../../utils/format';
 import {
   LineChart,
@@ -18,11 +20,28 @@ import {
 import type { AnalysisJob } from '../../types';
 
 export default function History() {
-  const { data: jobs, isLoading: jobsLoading } = useAnalysisHistory();
-  const { data: pnlHistory, isLoading: pnlLoading } = usePnlHistory();
+  usePageTitle('History');
+  const navigate = useNavigate();
+  const { data: jobs, isLoading: jobsLoading, error: jobsError } = useAnalysisHistory();
+  const { data: pnlHistory, isLoading: pnlLoading, error: pnlError } = usePnlHistory();
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
 
-  if (jobsLoading || pnlLoading) return <LoadingSpinner label="Loading history..." />;
+  // Fully empty state (Item 14)
+  if (!jobsLoading && !pnlLoading && (!jobs || jobs.length === 0) && (!pnlHistory || pnlHistory.length === 0)) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">History</h1>
+          <p className="mt-1 text-sm text-gray-500">Past analysis runs and portfolio performance over time</p>
+        </div>
+        <EmptyState
+          title="Analysis history will appear here after your first run"
+          description="Go to Holdings and click Run Analysis to start building your history."
+          action={{ label: 'Go to Holdings', onClick: () => navigate('/holdings') }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8">
@@ -32,11 +51,21 @@ export default function History() {
         <p className="mt-1 text-sm text-gray-500">Past analysis runs and portfolio performance over time</p>
       </div>
 
-      {/* P&L Timeline Chart */}
+      {/* P&L Timeline Chart - per-component loading/error (Item 9) */}
       <div className="rounded-xl border border-gray-200 bg-white p-6">
         <h2 className="text-sm font-semibold text-gray-900 mb-4">Portfolio Value Over Time</h2>
-        {!pnlHistory || pnlHistory.length === 0 ? (
-          <EmptyState title="No historical data" />
+        {pnlLoading ? (
+          <div className="h-72 flex items-center justify-center">
+            <Skeleton className="h-full w-full" />
+          </div>
+        ) : pnlError ? (
+          <div className="h-72 flex items-center justify-center">
+            <p className="text-sm text-red-600">Failed to load chart data</p>
+          </div>
+        ) : !pnlHistory || pnlHistory.length === 0 ? (
+          <div className="h-72 flex items-center justify-center">
+            <p className="text-sm text-gray-400">No historical data yet</p>
+          </div>
         ) : (
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
@@ -81,7 +110,9 @@ export default function History() {
       </div>
 
       {/* P&L Timeline */}
-      {pnlHistory && pnlHistory.length > 0 && (
+      {pnlLoading ? (
+        <SkeletonChart />
+      ) : pnlHistory && pnlHistory.length > 0 && (
         <div className="rounded-xl border border-gray-200 bg-white p-6">
           <h2 className="text-sm font-semibold text-gray-900 mb-4">P&L Over Time</h2>
           <div className="h-56">
@@ -113,10 +144,28 @@ export default function History() {
         </div>
       )}
 
-      {/* Analysis Job History */}
+      {/* Analysis Job History - per-component loading/error (Item 9) */}
       <div>
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Analysis Runs</h2>
-        {!jobs || jobs.length === 0 ? (
+        {jobsLoading ? (
+          <div className="space-y-3">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="rounded-xl border border-gray-200 bg-white p-6">
+                <div className="flex items-center gap-4">
+                  <Skeleton className="h-6 w-20 rounded-md" />
+                  <div className="space-y-1">
+                    <Skeleton className="h-4 w-40" />
+                    <Skeleton className="h-3 w-32" />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : jobsError ? (
+          <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-center">
+            <p className="text-sm text-red-700">Failed to load analysis history</p>
+          </div>
+        ) : !jobs || jobs.length === 0 ? (
           <EmptyState title="No analysis history" description="Run an analysis from the Holdings page." />
         ) : (
           <div className="space-y-3">

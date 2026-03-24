@@ -19,7 +19,7 @@ class TechnicalIndicators(BaseModel):
 
 class PriceDataResponse(BaseModel):
     ticker: str
-    price: float
+    price: float | None = None
     open: float | None = None
     high: float | None = None
     low: float | None = None
@@ -29,5 +29,15 @@ class PriceDataResponse(BaseModel):
     change_pct: float | None = None
     market_status: str | None = None
     indicators: TechnicalIndicators | None = None
-    fetched_at: str
+    fetched_at: str | None = None
     stale: bool = False
+
+
+class BatchPriceResponse(BaseModel):
+    prices: dict[str, PriceDataResponse]
+
+
+class TickerValidationResponse(BaseModel):
+    valid: bool
+    name: str | None = None
+    exchange: str | None = None

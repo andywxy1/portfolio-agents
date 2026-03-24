@@ -1,18 +1,65 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { usePositionAnalyses } from '../../api/hooks';
-import { LoadingSpinner } from '../../components/LoadingSpinner';
 import { EmptyState } from '../../components/EmptyState';
+import { SkeletonReportPanel, Skeleton } from '../../components/Skeleton';
 import { SignalBadge, JobStatusBadge } from '../../components/StatusBadge';
-import { formatCurrency, formatPnlPercent, pnlColor } from '../../utils/format';
+import { usePageTitle } from '../../hooks/usePageTitle';
+import { formatCurrency, formatPnlPercent, pnlColor, formatRelativeTime } from '../../utils/format';
 import type { PositionAnalysis } from '../../types';
 
 export default function Analysis() {
-  const { data: analyses, isLoading } = usePositionAnalyses();
+  usePageTitle('Analysis');
+  const navigate = useNavigate();
+  const { data: analyses, isLoading, error } = usePositionAnalyses();
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
 
-  if (isLoading) return <LoadingSpinner label="Loading analysis..." />;
+  // Loading skeleton (Item 8)
+  if (isLoading) {
+    return (
+      <div className="flex h-[calc(100vh-3rem)] gap-6">
+        <div className="w-64 flex-shrink-0 space-y-2">
+          <Skeleton className="h-4 w-20 mb-3" />
+          {Array.from({ length: 5 }).map((_, i) => (
+            <Skeleton key={i} className="h-14 w-full rounded-lg" />
+          ))}
+        </div>
+        <div className="flex-1 space-y-6">
+          <SkeletonReportPanel />
+          <SkeletonReportPanel />
+          <SkeletonReportPanel />
+        </div>
+      </div>
+    );
+  }
+
+  // Error state (Item 9)
+  if (error) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold text-gray-900">Analysis</h1>
+        <div className="rounded-xl border border-red-200 bg-red-50 p-6 text-center">
+          <p className="text-sm font-medium text-red-800">Failed to load analysis: {error.message}</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Empty state (Item 14)
   if (!analyses || analyses.length === 0) {
-    return <EmptyState title="No analysis results" description="Run an analysis from the Holdings page to see results." />;
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Analysis</h1>
+          <p className="mt-1 text-sm text-gray-500">AI-powered position analysis results</p>
+        </div>
+        <EmptyState
+          title="No analysis has been run yet"
+          description="Go to Holdings and click Run Analysis to get AI-powered insights on your positions."
+          action={{ label: 'Go to Holdings', onClick: () => navigate('/holdings') }}
+        />
+      </div>
+    );
   }
 
   const selected = analyses.find(a => a.ticker === selectedTicker) ?? analyses[0];
@@ -74,6 +121,12 @@ function AnalysisDetail({ analysis }: { analysis: PositionAnalysis }) {
             {formatPnlPercent(analysis.price_change_pct)}
           </p>
         </div>
+        {analysis.completed_at && (
+          <div>
+            <p className="text-xs text-gray-500">Analyzed</p>
+            <p className="text-sm text-gray-600">{formatRelativeTime(analysis.completed_at)}</p>
+          </div>
+        )}
       </div>
 
       {/* Raw Decision */}

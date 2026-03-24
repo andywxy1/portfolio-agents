@@ -27,9 +27,24 @@ import type {
   AppConfig,
   ConfigStatus,
   ValidationResult,
+  PriceData,
 } from '../types';
 
 const USE_MOCKS = import.meta.env.VITE_USE_MOCKS !== 'false';
+
+// Keys to invalidate when holdings change (Item 4)
+const HOLDINGS_RELATED_KEYS = [
+  ['holdings'],
+  ['portfolio-summary'],
+  ['recommendations'],
+  ['analysis', 'latest'],
+] as const;
+
+function invalidateHoldingsRelated(qc: ReturnType<typeof useQueryClient>) {
+  for (const key of HOLDINGS_RELATED_KEYS) {
+    qc.invalidateQueries({ queryKey: [...key] });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Holdings
@@ -59,8 +74,7 @@ export function useCreateHolding() {
       return apiClient.post<Holding>('/holdings', data);
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['holdings'] });
-      qc.invalidateQueries({ queryKey: ['portfolio-summary'] });
+      invalidateHoldingsRelated(qc);
     },
   });
 }
@@ -76,8 +90,7 @@ export function useUpdateHolding() {
       return apiClient.put<Holding>(`/holdings/${id}`, data);
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['holdings'] });
-      qc.invalidateQueries({ queryKey: ['portfolio-summary'] });
+      invalidateHoldingsRelated(qc);
     },
   });
 }
@@ -94,8 +107,86 @@ export function useDeleteHolding() {
       return true;
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['holdings'] });
-      qc.invalidateQueries({ queryKey: ['portfolio-summary'] });
+      invalidateHoldingsRelated(qc);
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Prices - batch polling (Item 1)
+// ---------------------------------------------------------------------------
+
+export function useBatchPrices(tickers: string[], enabled = true) {
+  return useQuery<PriceData[]>({
+    queryKey: ['prices', 'batch', tickers],
+    queryFn: async () => {
+      if (USE_MOCKS || tickers.length === 0) return [];
+      const qs = tickers.map(t => `tickers=${encodeURIComponent(t)}`).join('&');
+      return apiClient.get<PriceData[]>(`/prices/batch?${qs}`);
+    },
+    enabled: enabled && tickers.length > 0,
+    refetchInterval: 30_000, // Poll every 30 seconds
+    staleTime: 15_000,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Ticker validation (Item 11)
+// ---------------------------------------------------------------------------
+
+export function useValidateTicker(ticker: string) {
+  return useQuery<{ valid: boolean; name?: string }>({
+    queryKey: ['ticker-validate', ticker],
+    queryFn: async () => {
+      if (USE_MOCKS) {
+        await delay(200);
+        // In mock mode, accept any 1-5 char uppercase ticker
+        const valid = /^[A-Z]{1,5}$/.test(ticker.toUpperCase());
+        return { valid };
+      }
+      return apiClient.get<{ valid: boolean; name?: string }>(`/tickers/validate?ticker=${encodeURIComponent(ticker)}`);
+    },
+    enabled: ticker.length >= 1 && ticker.length <= 5,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Import / Export (Item 2)
+// ---------------------------------------------------------------------------
+
+export function useExportHoldings() {
+  return useMutation<Blob, Error, void>({
+    mutationFn: async () => {
+      const response = await fetch('/api/holdings/export', {
+        method: 'GET',
+        headers: { 'Content-Type': 'text/csv' },
+      });
+      if (!response.ok) throw new Error('Export failed');
+      return response.blob();
+    },
+  });
+}
+
+export function useImportHoldings() {
+  const qc = useQueryClient();
+  return useMutation<{ imported: number; errors: string[] }, Error, File>({
+    mutationFn: async (file) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      const response = await fetch('/api/holdings/import', {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ error: { message: 'Import failed' } }));
+        throw new Error(err.error?.message ?? 'Import failed');
+      }
+      return response.json();
+    },
+    onSuccess: () => {
+      invalidateHoldingsRelated(qc);
     },
   });
 }
@@ -186,8 +277,7 @@ export function useAnalysisHistory() {
         await delay();
         return mockAnalysisJobs;
       }
-      // Backend would need a list endpoint; for now use mock
-      return mockAnalysisJobs;
+      return apiClient.get<AnalysisJob[]>('/analysis/jobs');
     },
   });
 }
@@ -200,7 +290,7 @@ export function usePnlHistory() {
         await delay();
         return mockPnlHistory;
       }
-      return mockPnlHistory;
+      return apiClient.get<typeof mockPnlHistory>('/portfolio/pnl-history');
     },
   });
 }
