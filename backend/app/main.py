@@ -13,9 +13,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 
 from app.config import settings
-from app.database import init_db
+from app.database import SessionLocal, init_db
 from app.routers import (
     analysis,
     config,
@@ -34,12 +35,55 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _cleanup_stale_price_cache() -> None:
+    """Delete price_cache entries older than 7 days."""
+    db = SessionLocal()
+    try:
+        db.execute(
+            text(
+                "DELETE FROM price_cache "
+                "WHERE fetched_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-7 days')"
+            )
+        )
+        db.commit()
+        logger.info("Cleaned up stale price cache entries")
+    except Exception:
+        logger.exception("Failed to clean up price cache")
+    finally:
+        db.close()
+
+
+def _add_mode_column_if_missing() -> None:
+    """Add the `mode` column to analysis_jobs if it doesn't exist yet.
+
+    This handles upgrades from older schema versions.
+    """
+    db = SessionLocal()
+    try:
+        # Check if column exists
+        result = db.execute(text("PRAGMA table_info(analysis_jobs)")).fetchall()
+        column_names = [row[1] for row in result]
+        if "mode" not in column_names:
+            db.execute(
+                text("ALTER TABLE analysis_jobs ADD COLUMN mode TEXT DEFAULT 'portfolio'")
+            )
+            db.commit()
+            logger.info("Added 'mode' column to analysis_jobs table")
+    except Exception:
+        logger.exception("Failed to add mode column")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application startup and shutdown lifecycle."""
     logger.info("Initializing database...")
     init_db()
-    logger.info("Database initialized. Server ready.")
+    _add_mode_column_if_missing()
+    logger.info("Database initialized. Cleaning up stale cache...")
+    _cleanup_stale_price_cache()
+    logger.info("Server ready.")
     yield
     logger.info("Shutting down.")
 
@@ -51,15 +95,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS -- allow Vite dev server
+# CORS -- configurable origins with sane defaults
+_default_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+_cors_origins = getattr(settings, "cors_origins", None) or _default_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -93,8 +140,19 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
 @app.get("/api/health")
 async def health_check() -> dict:
-    """Health check endpoint (no auth required)."""
-    return {"status": "ok", "version": "1.0.0"}
+    """Health check endpoint (no auth required). Verifies DB connectivity."""
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(text("SELECT 1"))
+            db_ok = True
+        finally:
+            db.close()
+    except Exception:
+        db_ok = False
+
+    status = "ok" if db_ok else "degraded"
+    return {"status": status, "version": "1.0.0", "database": "ok" if db_ok else "error"}
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +171,9 @@ if _frontend_dist.exists():
         """Serve index.html for all non-API, non-asset routes (SPA routing)."""
         # If the exact file exists in dist (e.g. favicon.ico), serve it directly
         file_path = _frontend_dist / full_path
+        # Guard against path traversal (e.g. ../../etc/passwd)
+        if not file_path.resolve().is_relative_to(_frontend_dist.resolve()):
+            return FileResponse(_frontend_dist / "index.html")
         if full_path and file_path.exists() and file_path.is_file():
             return FileResponse(file_path)
         return FileResponse(_frontend_dist / "index.html")

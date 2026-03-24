@@ -94,13 +94,19 @@ def _read_env_file() -> dict[str, str]:
 
 
 def _write_env_file(env_vars: dict[str, str]) -> None:
-    """Write a dict back to the .env file."""
-    lines = [f'{k}={v}' for k, v in sorted(env_vars.items())]
+    """Write a dict back to the .env file. Values are double-quoted."""
+    lines = [f'{k}="{v}"' for k, v in sorted(env_vars.items())]
     _ENV_PATH.write_text("\n".join(lines) + "\n")
 
 
 def _reload_settings(env_vars: dict[str, str]) -> None:
-    """Update the global settings object in-place from the written env values."""
+    """Update the global settings object in-place from the written env values.
+
+    Weight threshold values are normalised to fractions (0-1) if they arrive
+    as percentage integers (e.g. 10 instead of 0.10) from the frontend.
+    """
+    _WEIGHT_THRESHOLD_KEYS = {"WEIGHT_HEAVY_THRESHOLD", "WEIGHT_MEDIUM_THRESHOLD"}
+
     for key in _ALLOWED_KEYS:
         attr = _settings_attr(key)
         if key in env_vars and hasattr(settings, attr):
@@ -111,7 +117,11 @@ def _reload_settings(env_vars: dict[str, str]) -> None:
                 annotation = field_info.annotation
                 try:
                     if annotation is float:
-                        object.__setattr__(settings, attr, float(raw))
+                        value = float(raw)
+                        # Normalise weight thresholds sent as percentages
+                        if key in _WEIGHT_THRESHOLD_KEYS and value > 1:
+                            value = value / 100.0
+                        object.__setattr__(settings, attr, value)
                     elif annotation is int:
                         object.__setattr__(settings, attr, int(raw))
                     else:
@@ -156,6 +166,10 @@ async def update_config(body: ConfigUpdate) -> dict[str, Any]:
                 }
             },
         )
+
+    # Skip masked values -- the frontend sends back "****..." for secrets
+    # that the user didn't change; writing those would overwrite the real value.
+    updates = {k: v for k, v in updates.items() if "****" not in str(v)}
 
     # Auto-set OPENAI_API_KEY when LLM_API_KEY is provided
     if "LLM_API_KEY" in updates and "OPENAI_API_KEY" not in updates:

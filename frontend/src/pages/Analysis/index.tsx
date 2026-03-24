@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { usePositionAnalyses } from '../../api/hooks';
+import { usePositionAnalyses, useStartAnalysis } from '../../api/hooks';
 import { EmptyState } from '../../components/EmptyState';
 import { SkeletonReportPanel, Skeleton } from '../../components/Skeleton';
 import { SignalBadge, JobStatusBadge } from '../../components/StatusBadge';
+import { useToast } from '../../components/Toast';
 import { usePageTitle } from '../../hooks/usePageTitle';
 import { formatCurrency, formatPnlPercent, pnlColor, formatRelativeTime } from '../../utils/format';
 import type { PositionAnalysis } from '../../types';
@@ -11,8 +12,25 @@ import type { PositionAnalysis } from '../../types';
 export default function Analysis() {
   usePageTitle('Analysis');
   const navigate = useNavigate();
+  const toast = useToast();
   const { data: analyses, isLoading, error } = usePositionAnalyses();
+  const analysisMutation = useStartAnalysis();
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+
+  const handleReanalyze = useCallback((ticker: string) => {
+    analysisMutation.mutate(
+      { mode: 'single', ticker },
+      {
+        onSuccess: (result) => {
+          toast.info(`Re-analysis started for ${ticker}`);
+          navigate(`/analysis/progress/${result.job_id}`);
+        },
+        onError: (err) => {
+          toast.error(`Analysis failed: ${err.message}`);
+        },
+      }
+    );
+  }, [analysisMutation, navigate, toast]);
 
   // Loading skeleton (Item 8)
   if (isLoading) {
@@ -90,13 +108,25 @@ export default function Analysis() {
 
       {/* Right panel - detail */}
       <div className="flex-1 overflow-y-auto space-y-6">
-        <AnalysisDetail analysis={selected} />
+        <AnalysisDetail
+          analysis={selected}
+          onReanalyze={handleReanalyze}
+          isReanalyzing={analysisMutation.isPending}
+        />
       </div>
     </div>
   );
 }
 
-function AnalysisDetail({ analysis }: { analysis: PositionAnalysis }) {
+function AnalysisDetail({
+  analysis,
+  onReanalyze,
+  isReanalyzing,
+}: {
+  analysis: PositionAnalysis;
+  onReanalyze: (ticker: string) => void;
+  isReanalyzing: boolean;
+}) {
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -107,6 +137,13 @@ function AnalysisDetail({ analysis }: { analysis: PositionAnalysis }) {
         <span className="text-sm text-gray-500 capitalize">
           {analysis.analysis_depth} analysis
         </span>
+        <button
+          onClick={() => onReanalyze(analysis.ticker)}
+          disabled={isReanalyzing}
+          className="ml-auto rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+        >
+          {isReanalyzing ? 'Starting...' : 'Re-analyze'}
+        </button>
       </div>
 
       {/* Price info */}

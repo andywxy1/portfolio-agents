@@ -98,7 +98,7 @@ export default function History() {
                 />
                 <Area
                   type="monotone"
-                  dataKey="value"
+                  dataKey="total_value"
                   stroke="#10b981"
                   strokeWidth={2}
                   fill="url(#colorValue)"

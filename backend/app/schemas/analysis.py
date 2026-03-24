@@ -9,6 +9,8 @@ class AnalysisJobConfig(BaseModel):
 
 
 class StartAnalysisRequest(BaseModel):
+    mode: Literal["single", "portfolio", "all_individual"] = "portfolio"
+    ticker: str | None = None  # required for "single" mode
     tickers: list[str] | None = None
     config: AnalysisJobConfig | None = None
 
@@ -18,6 +20,20 @@ class StartAnalysisResponse(BaseModel):
     status: str
     tickers: list[str]
     total_tickers: int
+    mode: str = "portfolio"
+
+
+class AnalysisJobListItem(BaseModel):
+    """Lightweight job summary for the history page listing."""
+    id: str
+    status: str
+    mode: str | None = None
+    created_at: str
+    completed_at: str | None = None
+    tickers_total: int
+    tickers_completed: int
+    tickers_failed: int = 0
+    error_message: str | None = None
 
 
 class PositionAnalysisSummary(BaseModel):

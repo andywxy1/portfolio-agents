@@ -33,8 +33,18 @@ def _build_graph_config(
     max_debate_rounds: int = 1,
     max_risk_discuss_rounds: int = 1,
 ) -> dict[str, Any]:
-    """Build a TradingAgentsGraph config dict pointing at the LLM proxy."""
-    return {
+    """Build a TradingAgentsGraph config dict pointing at the LLM proxy.
+
+    Merges with the TradingAgents DEFAULT_CONFIG to ensure all required
+    keys are present (e.g. project_dir, data_cache_dir, results_dir).
+    """
+    try:
+        from tradingagents.default_config import DEFAULT_CONFIG
+        base = dict(DEFAULT_CONFIG)
+    except ImportError:
+        base = {}
+
+    base.update({
         "llm_provider": "ollama",
         "backend_url": settings.llm_base_url,
         "deep_think_llm": settings.llm_deep_model,
@@ -49,7 +59,8 @@ def _build_graph_config(
             "news_data": "yfinance",
         },
         "tool_vendors": {},
-    }
+    })
+    return base
 
 
 def _ensure_env() -> None:
@@ -61,9 +72,10 @@ def _ensure_env() -> None:
     proxy).  We use ``setdefault`` so that explicit env vars are not
     overwritten.
     """
-    if settings.llm_api_key:
-        os.environ.setdefault("OPENAI_API_KEY", settings.llm_api_key)
-        os.environ.setdefault("OLLAMA_API_KEY", settings.llm_api_key)
+    api_key = settings.llm_api_key or settings.openai_api_key
+    if api_key:
+        os.environ.setdefault("OPENAI_API_KEY", api_key)
+        os.environ.setdefault("OLLAMA_API_KEY", api_key)
 
 
 def _extract_result(

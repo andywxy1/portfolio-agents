@@ -7,13 +7,13 @@ identifies underweight sectors, and suggests top stocks from those sectors.
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from app.models.holding import Holding
 from app.models.suggestion import StockSuggestion
 from app.services.portfolio import get_sector
+from app.utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +114,6 @@ SECTOR_TOP_STOCKS: dict[str, list[dict]] = {
 }
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def generate_suggestions(
@@ -123,22 +121,35 @@ def generate_suggestions(
     job_id: str,
     user_id: str,
     holdings: list[Holding],
+    current_prices: dict[str, float] | None = None,
 ) -> list[StockSuggestion]:
     """Generate stock suggestions based on sector-gap analysis.
 
     Compares portfolio sector allocation against S&P 500 sector weights.
     For each underweight sector, suggests top stocks that are not already
     in the portfolio.
+
+    Uses market prices where available (via ``current_prices``), falling
+    back to buy_price when no current price is known.
     """
-    # Compute portfolio sector weights
-    total_cost = sum(h.shares * h.buy_price for h in holdings) if holdings else 0
+    if current_prices is None:
+        current_prices = {}
+
+    # Compute portfolio sector weights using market value where possible
+    total_value = 0.0
+    position_values: dict[str, float] = {}
+    for h in holdings:
+        price = current_prices.get(h.ticker.upper(), h.buy_price)
+        val = h.shares * price
+        position_values[h.ticker] = val
+        total_value += val
+
     portfolio_sector_weights: dict[str, float] = {}
     portfolio_tickers = {h.ticker.upper() for h in holdings}
 
     for h in holdings:
         sector = get_sector(h.ticker)
-        cost_basis = h.shares * h.buy_price
-        weight = cost_basis / total_cost if total_cost > 0 else 0
+        weight = position_values[h.ticker] / total_value if total_value > 0 else 0
         portfolio_sector_weights[sector] = portfolio_sector_weights.get(sector, 0.0) + weight
 
     # Find underweight sectors (where portfolio weight is significantly below S&P 500)
@@ -163,8 +174,8 @@ def generate_suggestions(
         for stock in available[:2]:
             suggested_weight = round(min(gap / 2, 0.05), 4)  # Split gap, cap at 5%
             suggested_shares = None
-            if stock.get("market_cap") and total_cost > 0:
-                target_value = total_cost * suggested_weight
+            if stock.get("market_cap") and total_value > 0:
+                target_value = total_value * suggested_weight
                 estimated_price = stock.get("market_cap", 0) / 1e9 * 0.1  # Very rough
                 # Use a more realistic price estimation
                 estimated_price = stock.get("pe", 25) * 5  # Rough heuristic
@@ -195,7 +206,7 @@ def generate_suggestions(
                 suggested_weight=suggested_weight,
                 suggested_shares=suggested_shares,
                 status="pending",
-                created_at=_now(),
+                created_at=utc_now(),
             )
             db.add(suggestion)
             suggestions.append(suggestion)

@@ -32,7 +32,7 @@ import {
   formatPercent,
   pnlColor,
 } from '../../utils/format';
-import type { HoldingWithPrice } from '../../types';
+import type { HoldingWithPrice, AnalysisMode } from '../../types';
 
 export default function Holdings() {
   usePageTitle('Holdings');
@@ -62,6 +62,9 @@ export default function Holdings() {
   // Confirm dialogs (Item 7)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [analysisConfirmOpen, setAnalysisConfirmOpen] = useState(false);
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('portfolio');
+  const [analysisDropdownOpen, setAnalysisDropdownOpen] = useState(false);
+  const analysisDropdownRef = useRef<HTMLDivElement>(null);
 
   // Ticker validation (Item 11)
   const [tickerInput, setTickerInput] = useState('');
@@ -144,6 +147,18 @@ export default function Holdings() {
     });
   }, [exportMutation, toast]);
 
+  // Close analysis dropdown on outside click
+  useEffect(() => {
+    if (!analysisDropdownOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (analysisDropdownRef.current && !analysisDropdownRef.current.contains(e.target as Node)) {
+        setAnalysisDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [analysisDropdownOpen]);
+
   // Keyboard shortcuts (Item 12)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -224,13 +239,14 @@ export default function Holdings() {
     });
   }, [deleteMutation, holdings, toast]);
 
-  const handleStartAnalysis = useCallback(() => {
+  const handleStartAnalysis = useCallback((mode: AnalysisMode = 'portfolio', ticker?: string) => {
     setAnalysisConfirmOpen(false);
+    setAnalysisDropdownOpen(false);
     analysisMutation.mutate(
-      {},
+      { mode, ...(ticker ? { ticker } : {}) },
       {
         onSuccess: (result) => {
-          toast.info(`Analysis started for ${result.total_tickers} positions`);
+          toast.info(`Analysis started for ${result.total_tickers} position${result.total_tickers !== 1 ? 's' : ''}`);
           navigate(`/analysis/progress/${result.job_id}`);
         },
         onError: (err) => {
@@ -376,13 +392,23 @@ export default function Holdings() {
         }
         return (
           <div className="flex gap-1">
+            <button
+              onClick={() => handleStartAnalysis('single', row.original.ticker)}
+              disabled={analysisMutation.isPending}
+              className="rounded px-1.5 py-1 text-xs font-medium text-emerald-600 hover:bg-emerald-50 disabled:opacity-50"
+              title={`Analyze ${row.original.ticker}`}
+            >
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+              </svg>
+            </button>
             <button onClick={() => startEdit(row.original)} className="rounded px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50">Edit</button>
             <button onClick={() => setDeleteConfirmId(row.original.id)} className="rounded px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50">Delete</button>
           </div>
         );
       },
     },
-  ], [editingId, editValues, savingIndicator, handleEditChange, cancelEdit, startEdit]);
+  ], [editingId, editValues, savingIndicator, handleEditChange, cancelEdit, startEdit, handleStartAnalysis, analysisMutation.isPending]);
 
   const table = useReactTable({
     data: holdings ?? [],
@@ -432,19 +458,65 @@ export default function Holdings() {
           <p className="mt-1 text-sm text-gray-500">Manage your portfolio positions</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => {
-              if (!holdings || holdings.length === 0) {
-                toast.warning('Add holdings before running analysis');
-                return;
-              }
-              setAnalysisConfirmOpen(true);
-            }}
-            disabled={analysisMutation.isPending}
-            className="rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 disabled:opacity-50 transition-colors"
-          >
-            {analysisMutation.isPending ? 'Starting...' : 'Run Analysis'}
-          </button>
+          {/* Split button: Analyze Portfolio (primary) + dropdown for other modes */}
+          <div className="relative inline-flex" ref={analysisDropdownRef}>
+            <button
+              onClick={() => {
+                if (!holdings || holdings.length === 0) {
+                  toast.warning('Add holdings before running analysis');
+                  return;
+                }
+                setAnalysisMode('portfolio');
+                setAnalysisConfirmOpen(true);
+              }}
+              disabled={analysisMutation.isPending}
+              className="rounded-l-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 disabled:opacity-50 transition-colors"
+            >
+              {analysisMutation.isPending ? 'Starting...' : 'Analyze Portfolio'}
+            </button>
+            <button
+              onClick={() => {
+                if (!holdings || holdings.length === 0) {
+                  toast.warning('Add holdings before running analysis');
+                  return;
+                }
+                setAnalysisDropdownOpen(prev => !prev);
+              }}
+              disabled={analysisMutation.isPending}
+              className="rounded-r-lg border-l border-emerald-700 bg-emerald-600 px-2 py-2.5 text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
+              aria-label="More analysis options"
+            >
+              <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+              </svg>
+            </button>
+            {analysisDropdownOpen && (
+              <div className="absolute right-0 top-full z-20 mt-1 w-72 rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                <button
+                  onClick={() => {
+                    setAnalysisMode('portfolio');
+                    setAnalysisDropdownOpen(false);
+                    setAnalysisConfirmOpen(true);
+                  }}
+                  className="flex w-full flex-col px-4 py-2.5 text-left hover:bg-gray-50"
+                >
+                  <span className="text-sm font-medium text-gray-900">Analyze Portfolio</span>
+                  <span className="text-xs text-gray-500">Tiered depth with portfolio synthesis</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setAnalysisMode('all_individual');
+                    setAnalysisDropdownOpen(false);
+                    setAnalysisConfirmOpen(true);
+                  }}
+                  className="flex w-full flex-col px-4 py-2.5 text-left hover:bg-gray-50"
+                >
+                  <span className="text-sm font-medium text-gray-900">Analyze All (Full Depth)</span>
+                  <span className="text-xs text-gray-500">Full analysis on every holding -- may take a while</span>
+                </button>
+              </div>
+            )}
+          </div>
           <button
             onClick={handleExport}
             disabled={exportMutation.isPending || !holdings?.length}
@@ -656,10 +728,14 @@ export default function Holdings() {
 
       <ConfirmDialog
         open={analysisConfirmOpen}
-        title="Run Analysis"
-        message={`Analyze ${holdings?.length ?? 0} position${(holdings?.length ?? 0) !== 1 ? 's' : ''}? This will use AI to evaluate each holding.`}
+        title={analysisMode === 'all_individual' ? 'Analyze All (Full Depth)' : 'Analyze Portfolio'}
+        message={
+          analysisMode === 'all_individual'
+            ? `This will run full analysis on all ${holdings?.length ?? 0} positions and may take a while. Continue?`
+            : `Analyze ${holdings?.length ?? 0} position${(holdings?.length ?? 0) !== 1 ? 's' : ''} with tiered depth and portfolio synthesis?`
+        }
         confirmLabel="Start Analysis"
-        onConfirm={handleStartAnalysis}
+        onConfirm={() => handleStartAnalysis(analysisMode)}
         onCancel={() => setAnalysisConfirmOpen(false)}
       />
     </div>

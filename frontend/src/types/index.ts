@@ -80,6 +80,7 @@ export interface AnalysisJob {
   id: UUID;
   user_id: string;
   status: AnalysisJobStatus;
+  mode?: AnalysisMode;
   tickers: string[];
   total_tickers: number;
   completed_tickers: number;
@@ -91,7 +92,11 @@ export interface AnalysisJob {
   position_analyses?: PositionAnalysisSummary[];
 }
 
+export type AnalysisMode = "portfolio" | "all_individual" | "single";
+
 export interface StartAnalysisRequest {
+  mode?: AnalysisMode;
+  ticker?: string;
   tickers?: string[];
   config?: AnalysisJobConfig;
 }
@@ -350,7 +355,7 @@ export interface TechnicalIndicators {
 
 export interface PriceData {
   ticker: string;
-  price: number;
+  price: number | null;
   open: number | null;
   high: number | null;
   low: number | null;
@@ -360,7 +365,7 @@ export interface PriceData {
   change_pct: number | null;
   market_status: "open" | "closed" | "pre" | "post" | null;
   indicators: TechnicalIndicators | null;
-  fetched_at: ISODateTime;
+  fetched_at: ISODateTime | null;
   stale: boolean;
 }
 
@@ -387,6 +392,18 @@ export interface GetReportsParams {
 export interface GetSuggestionsParams {
   status?: SuggestionStatus;
   gap_type?: GapType;
+}
+
+// ---------------------------------------------------------------------------
+// PnL History
+// ---------------------------------------------------------------------------
+
+export interface PnlHistoryEntry {
+  date: string;
+  total_value: number;
+  total_cost: number;
+  pnl: number;
+  pnl_pct: number;
 }
 
 // ---------------------------------------------------------------------------

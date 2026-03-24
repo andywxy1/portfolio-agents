@@ -247,7 +247,31 @@ export default function Recommendations() {
   );
 }
 
+function getWatchlist(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem('watchlist') ?? '[]');
+  } catch {
+    return [];
+  }
+}
+
+function toggleWatchlist(ticker: string): boolean {
+  const list = getWatchlist();
+  const idx = list.indexOf(ticker);
+  if (idx >= 0) {
+    list.splice(idx, 1);
+    localStorage.setItem('watchlist', JSON.stringify(list));
+    return false;
+  }
+  list.push(ticker);
+  localStorage.setItem('watchlist', JSON.stringify(list));
+  return true;
+}
+
 function SuggestionCard({ suggestion: s }: { suggestion: StockSuggestion }) {
+  const [isWatched, setIsWatched] = useState(() => getWatchlist().includes(s.ticker));
+  const toast = useToast();
+
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-5 space-y-3 hover:shadow-md transition-shadow">
       <div className="flex items-start justify-between">
@@ -274,8 +298,19 @@ function SuggestionCard({ suggestion: s }: { suggestion: StockSuggestion }) {
         {s.suggested_weight && <span>Suggested {formatPercent(s.suggested_weight)}</span>}
       </div>
 
-      <button className="w-full rounded-lg border border-gray-200 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
-        Watch
+      <button
+        onClick={() => {
+          const added = toggleWatchlist(s.ticker);
+          setIsWatched(added);
+          toast.info(added ? `${s.ticker} added to watchlist` : `${s.ticker} removed from watchlist`);
+        }}
+        className={`w-full rounded-lg border py-2 text-sm font-medium transition-colors ${
+          isWatched
+            ? 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+            : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+        }`}
+      >
+        {isWatched ? 'Watching' : 'Watch'}
       </button>
     </div>
   );

@@ -8,6 +8,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -24,25 +25,26 @@ _MARKET_OPEN_MINUTE = 30
 _MARKET_CLOSE_HOUR = 16
 _MARKET_CLOSE_MINUTE = 0
 
+_EASTERN = ZoneInfo("America/New_York")
+
 _CACHE_TTL_MARKET_HOURS = 60  # seconds
 _CACHE_TTL_OFF_HOURS = 86400  # 24 hours in seconds
 
 
 def _is_market_hours() -> bool:
-    """Check if US stock market is currently open (approximate)."""
-    now = datetime.now(timezone.utc)
-    # Rough Eastern Time offset (UTC-5 or UTC-4 for DST)
-    # For simplicity, use UTC-5 (EST). A production system would use pytz/zoneinfo.
-    eastern_hour = (now.hour - 5) % 24
-    eastern_minute = now.minute
-    weekday = now.weekday()
+    """Check if US stock market is currently open.
+
+    Uses proper Eastern Time zone handling (accounts for DST).
+    """
+    now_et = datetime.now(_EASTERN)
+    weekday = now_et.weekday()
 
     if weekday >= 5:  # Saturday=5, Sunday=6
         return False
 
     market_open = _MARKET_OPEN_HOUR * 60 + _MARKET_OPEN_MINUTE
     market_close = _MARKET_CLOSE_HOUR * 60 + _MARKET_CLOSE_MINUTE
-    current = eastern_hour * 60 + eastern_minute
+    current = now_et.hour * 60 + now_et.minute
 
     return market_open <= current < market_close
 
@@ -54,14 +56,12 @@ def _get_cache_ttl() -> int:
 
 def _get_market_status() -> str:
     """Return a simple market status string."""
-    now = datetime.now(timezone.utc)
-    weekday = now.weekday()
+    now_et = datetime.now(_EASTERN)
+    weekday = now_et.weekday()
     if weekday >= 5:
         return "closed"
 
-    eastern_hour = (now.hour - 5) % 24
-    eastern_minute = now.minute
-    current = eastern_hour * 60 + eastern_minute
+    current = now_et.hour * 60 + now_et.minute
     market_open = _MARKET_OPEN_HOUR * 60 + _MARKET_OPEN_MINUTE
     market_close = _MARKET_CLOSE_HOUR * 60 + _MARKET_CLOSE_MINUTE
 

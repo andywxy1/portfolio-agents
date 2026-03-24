@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConfig, useUpdateConfig, useValidateConfig } from '../../api/hooks';
 import type { AppConfig, ValidationResult } from '../../types';
@@ -20,7 +20,7 @@ const MODEL_PRESETS = [
 
 const DEFAULT_CONFIG: Partial<AppConfig> = {
   alpaca_base_url: 'https://paper-api.alpaca.markets',
-  llm_base_url: 'http://10.0.0.126:8317/v1',
+  llm_base_url: 'http://localhost:8317/v1',
   llm_quick_model: 'claude-sonnet-4-6',
   llm_deep_model: 'claude-opus-4-6',
   weight_heavy_threshold: 10,
@@ -47,8 +47,21 @@ export default function Setup() {
   const [showPasswords, setShowPasswords] = useState<Record<string, boolean>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Track which fields the user has actually changed (Fix 5)
+  const changedFieldsRef = useRef<Set<string>>(new Set());
+
+  // Reload form state when existingConfig loads (Fix 4)
+  useEffect(() => {
+    if (existingConfig) {
+      setForm((prev) => ({ ...DEFAULT_CONFIG, ...existingConfig, ...Object.fromEntries(
+        Array.from(changedFieldsRef.current).map(k => [k, prev[k as keyof AppConfig]])
+      ) }));
+    }
+  }, [existingConfig]);
+
   const updateField = useCallback(
     <K extends keyof AppConfig>(key: K, value: AppConfig[K]) => {
+      changedFieldsRef.current.add(key);
       setForm((prev) => ({ ...prev, [key]: value }));
     },
     []
@@ -81,7 +94,23 @@ export default function Setup() {
   const handleSave = useCallback(async () => {
     setSaveError(null);
     try {
-      await updateConfig.mutateAsync(form);
+      // Only send fields the user actually changed - avoid sending masked "****" values (Fix 5)
+      const payload: Partial<AppConfig> = {};
+      const changed = changedFieldsRef.current;
+      if (changed.size === 0) {
+        // If nothing changed but we're on initial setup, send all non-masked fields
+        for (const [k, v] of Object.entries(form)) {
+          if (typeof v === 'string' && v.includes('****')) continue;
+          (payload as Record<string, unknown>)[k] = v;
+        }
+      } else {
+        for (const key of changed) {
+          const val = form[key as keyof AppConfig];
+          if (typeof val === 'string' && val.includes('****')) continue;
+          (payload as Record<string, unknown>)[key] = val;
+        }
+      }
+      await updateConfig.mutateAsync(payload);
       setStep(STEPS.length - 1);
     } catch (err: any) {
       setSaveError(err?.message ?? 'Failed to save configuration');
@@ -376,7 +405,7 @@ function LLMStep({
           label="Base URL"
           value={form.llm_base_url ?? ''}
           onChange={(v) => updateField('llm_base_url', v)}
-          placeholder="http://10.0.0.126:8317/v1"
+          placeholder="http://localhost:8317/v1"
         />
 
         <PasswordField

@@ -1,11 +1,16 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HoldingBase(BaseModel):
-    ticker: str = Field(..., min_length=1, max_length=10, pattern=r"^[A-Z0-9.]+$")
+    ticker: str = Field(..., min_length=1, max_length=10, pattern=r"^[A-Za-z0-9.]+$")
     shares: float = Field(..., gt=0)
     buy_price: float = Field(..., ge=0)
     notes: str | None = None
+
+    @field_validator("ticker", mode="before")
+    @classmethod
+    def uppercase_ticker(cls, v: str) -> str:
+        return v.upper() if isinstance(v, str) else v
 
 
 class HoldingCreate(HoldingBase):
@@ -13,10 +18,15 @@ class HoldingCreate(HoldingBase):
 
 
 class HoldingUpdate(BaseModel):
-    ticker: str | None = Field(None, min_length=1, max_length=10, pattern=r"^[A-Z0-9.]+$")
+    ticker: str | None = Field(None, min_length=1, max_length=10, pattern=r"^[A-Za-z0-9.]+$")
     shares: float | None = Field(None, gt=0)
     buy_price: float | None = Field(None, ge=0)
     notes: str | None = None
+
+    @field_validator("ticker", mode="before")
+    @classmethod
+    def uppercase_ticker(cls, v: str | None) -> str | None:
+        return v.upper() if isinstance(v, str) else v
 
 
 class HoldingResponse(BaseModel):

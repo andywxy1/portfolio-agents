@@ -13,6 +13,7 @@ Each job:
 import json
 import logging
 import os
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from app.services.pipeline_adapter import PipelineAdapter
 from app.services.portfolio import TICKER_SECTOR_MAP, get_sector
 from app.services.recommendation_generator import generate_recommendations
 from app.services.suggestion import generate_suggestions
+from app.utils import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +42,27 @@ class AnalysisRunner:
     def __init__(self) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._adapter = PipelineAdapter()
+        self._cancelled: set[str] = set()
+        self._lock = threading.Lock()
 
     def submit_job(self, job_id: str, config: dict[str, Any] | None = None) -> None:
         """Submit a job to the background executor (non-blocking)."""
         self._executor.submit(self._run_job, job_id, config or {})
+
+    def cancel_job(self, job_id: str) -> None:
+        """Request cancellation of a running job."""
+        with self._lock:
+            self._cancelled.add(job_id)
+
+    def _is_cancelled(self, job_id: str) -> bool:
+        """Check if a job has been cancelled."""
+        with self._lock:
+            return job_id in self._cancelled
+
+    def _clear_cancelled(self, job_id: str) -> None:
+        """Remove the cancellation flag after the job ends."""
+        with self._lock:
+            self._cancelled.discard(job_id)
 
     # ------------------------------------------------------------------
     # Job lifecycle
@@ -58,10 +77,12 @@ class AnalysisRunner:
             logger.exception("Job %s failed with unexpected error", job_id)
             self._fail_job(db, job_id, "Internal error during analysis execution")
         finally:
+            self._clear_cancelled(job_id)
             db.close()
 
     def _execute(self, db: Session, job_id: str, config: dict[str, Any]) -> None:
-        now = _now()
+        now = utc_now()
+        mode = config.get("mode", "portfolio")
 
         # Mark running
         job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
@@ -72,16 +93,36 @@ class AnalysisRunner:
         job.started_at = now
         db.commit()
 
-        tickers: list[str] = json.loads(job.tickers)
         user_id = job.user_id
         depth_overrides: dict[str, str] = config.get("depth_overrides", {}) or {}
 
-        # Fetch holdings for weight-based depth determination
+        # Re-query holdings at execution time (Fix #19)
         holdings = (
             db.query(Holding)
             .filter(Holding.user_id == user_id, Holding.deleted_at.is_(None))
             .all()
         )
+        active_tickers = {h.ticker.upper() for h in holdings}
+
+        # Filter tickers to only those that still have active holdings
+        requested_tickers: list[str] = json.loads(job.tickers)
+        if mode != "single":
+            tickers = [t for t in requested_tickers if t.upper() in active_tickers]
+        else:
+            # Single mode: always analyse the requested ticker even if not held
+            tickers = requested_tickers
+
+        if not tickers:
+            job.status = "completed"
+            job.completed_at = utc_now()
+            job.error_message = "No active holdings found for analysis"
+            db.commit()
+            return
+
+        # Update tickers and total count (may have changed from re-query)
+        job.tickers = json.dumps(tickers)
+        job.total_tickers = len(tickers)
+        db.commit()
 
         # Compute weights using current prices where available
         weight_map, current_prices = _compute_weight_map_with_prices(db, holdings)
@@ -90,10 +131,23 @@ class AnalysisRunner:
         position_summaries: list[dict[str, Any]] = []
 
         for ticker in tickers:
+            # Check for cancellation between ticker analyses
+            if self._is_cancelled(job_id):
+                job.status = "cancelled"
+                job.completed_at = utc_now()
+                job.error_message = "Cancelled by user"
+                db.commit()
+                logger.info("Job %s cancelled by user", job_id)
+                return
+
             try:
-                depth = depth_overrides.get(ticker) or _determine_depth(
-                    weight_map.get(ticker, 0.0)
-                )
+                # Determine depth based on mode
+                if mode in ("single", "all_individual"):
+                    depth = "full"
+                else:
+                    depth = depth_overrides.get(ticker) or _determine_depth(
+                        weight_map.get(ticker, 0.0)
+                    )
 
                 # Create position analysis row
                 pa_id = str(uuid.uuid4())
@@ -104,7 +158,7 @@ class AnalysisRunner:
                     ticker=ticker,
                     analysis_depth=depth,
                     status="running",
-                    created_at=_now(),
+                    created_at=utc_now(),
                 )
                 db.add(pa)
                 db.commit()
@@ -116,7 +170,7 @@ class AnalysisRunner:
                 if result.get("signal") == "ERROR":
                     pa.status = "failed"
                     pa.error_message = result.get("error", "Unknown pipeline error")
-                    pa.completed_at = _now()
+                    pa.completed_at = utc_now()
                     db.commit()
                     completed_count += 1
                     job.completed_tickers = completed_count
@@ -144,7 +198,7 @@ class AnalysisRunner:
                 pa.investment_plan = _to_json(result.get("investment_plan"))
                 pa.current_price = price
                 pa.price_change_pct = None  # TODO: compute from cached data
-                pa.completed_at = _now()
+                pa.completed_at = utc_now()
                 db.commit()
 
                 # Store reports
@@ -177,7 +231,7 @@ class AnalysisRunner:
                 if pa_row:
                     pa_row.status = "failed"
                     pa_row.error_message = f"Analysis failed for {ticker}"
-                    pa_row.completed_at = _now()
+                    pa_row.completed_at = utc_now()
                 db.commit()
                 position_summaries.append({
                     "ticker": ticker,
@@ -191,49 +245,58 @@ class AnalysisRunner:
 
         # ---------------------------------------------------------------
         # Portfolio-level synthesis + recommendations
+        # (Skip for single mode -- no portfolio-level analysis needed)
         # ---------------------------------------------------------------
-        try:
-            allocation, concentration, sector_breakdown = (
-                self._build_portfolio_data(holdings, current_prices)
-            )
+        if mode != "single" and not self._is_cancelled(job_id):
+            try:
+                allocation, concentration, sector_breakdown = (
+                    self._build_portfolio_data(holdings, current_prices)
+                )
 
-            self._generate_portfolio_insight(
-                db,
-                job_id,
-                user_id,
-                tickers,
-                holdings,
-                position_summaries,
-                allocation,
-                concentration,
-                sector_breakdown,
-            )
+                self._generate_portfolio_insight(
+                    db,
+                    job_id,
+                    user_id,
+                    tickers,
+                    holdings,
+                    position_summaries,
+                    allocation,
+                    concentration,
+                    sector_breakdown,
+                )
 
-            # Generate structured order recommendations via LLM
-            self._generate_order_recommendations(
-                db,
-                job_id,
-                user_id,
-                position_summaries,
-                allocation,
-                concentration,
-                sector_breakdown,
-                current_prices,
-            )
-        except Exception:
-            logger.exception("Portfolio synthesis failed for job %s", job_id)
+                # Generate structured order recommendations via LLM
+                self._generate_order_recommendations(
+                    db,
+                    job_id,
+                    user_id,
+                    position_summaries,
+                    allocation,
+                    concentration,
+                    sector_breakdown,
+                    current_prices,
+                )
+            except Exception:
+                logger.exception("Portfolio synthesis failed for job %s", job_id)
 
-        # Sector-gap suggestions
-        try:
-            generate_suggestions(db, job_id, user_id, holdings)
-        except Exception:
-            logger.exception("Suggestion generation failed for job %s", job_id)
+            # Sector-gap suggestions
+            try:
+                generate_suggestions(db, job_id, user_id, holdings, current_prices=current_prices)
+            except Exception:
+                logger.exception("Suggestion generation failed for job %s", job_id)
 
-        # Mark complete
-        job.status = "completed"
-        job.completed_at = _now()
-        db.commit()
-        logger.info("Job %s completed successfully", job_id)
+        # Mark complete (unless cancelled during synthesis)
+        if not self._is_cancelled(job_id):
+            job.status = "completed"
+            job.completed_at = utc_now()
+            db.commit()
+            logger.info("Job %s completed successfully", job_id)
+        else:
+            job.status = "cancelled"
+            job.completed_at = utc_now()
+            job.error_message = "Cancelled by user"
+            db.commit()
+            logger.info("Job %s cancelled by user", job_id)
 
     # ------------------------------------------------------------------
     # Report storage
@@ -285,7 +348,7 @@ class AnalysisRunner:
                 title=f"{title} - {ticker}",
                 content=content_json,
                 summary=summary[:500] if isinstance(summary, str) else str(summary)[:500],
-                created_at=_now(),
+                created_at=utc_now(),
             )
             db.add(report)
 
@@ -304,7 +367,7 @@ class AnalysisRunner:
                     "raw_decision": result.get("raw_decision", ""),
                 }),
                 summary=f"Signal: {result['signal']} for {ticker}",
-                created_at=_now(),
+                created_at=utc_now(),
             )
             db.add(report)
 
@@ -506,7 +569,7 @@ class AnalysisRunner:
             strengths=json.dumps(strengths) if strengths else None,
             weaknesses=json.dumps(weaknesses) if weaknesses else None,
             action_items=json.dumps(action_items) if action_items else None,
-            created_at=_now(),
+            created_at=utc_now(),
         )
         db.add(insight)
         db.commit()
@@ -541,6 +604,17 @@ class AnalysisRunner:
             if rec.get("priority_label"):
                 tags.append(rec["priority_label"])
 
+            # Fix #12: handle None/0 quantity gracefully -- default to 1
+            # share when the LLM doesn't provide a quantity.
+            # (DB schema requires quantity > 0 on existing databases.)
+            quantity = rec.get("quantity")
+            try:
+                quantity = float(quantity) if quantity is not None else 0
+            except (TypeError, ValueError):
+                quantity = 0
+            if quantity <= 0:
+                quantity = 1.0
+
             db_rec = Recommendation(
                 id=str(uuid.uuid4()),
                 job_id=job_id,
@@ -548,7 +622,7 @@ class AnalysisRunner:
                 ticker=rec.get("ticker", ""),
                 order_type=rec.get("order_type", "market"),
                 side=side,
-                quantity=rec.get("quantity") or 0,
+                quantity=quantity,
                 limit_price=rec.get("limit_price"),
                 stop_price=rec.get("stop_price"),
                 time_in_force=rec.get("time_in_force", "day"),
@@ -559,8 +633,8 @@ class AnalysisRunner:
                 priority=rec.get("priority", 1),
                 tags=json.dumps(tags),
                 status="pending",
-                created_at=_now(),
-                updated_at=_now(),
+                created_at=utc_now(),
+                updated_at=utc_now(),
             )
             db.add(db_rec)
 
@@ -579,7 +653,7 @@ class AnalysisRunner:
         if job:
             job.status = "failed"
             job.error_message = message
-            job.completed_at = _now()
+            job.completed_at = utc_now()
             db.commit()
 
 
@@ -600,10 +674,6 @@ def get_runner() -> AnalysisRunner:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _to_json(obj: Any) -> str | None:
@@ -667,10 +737,22 @@ def _determine_depth(weight: float) -> str:
       - weight >= heavy_threshold  -> "full"   (heavy tier)
       - weight >= medium_threshold -> "standard" (medium tier)
       - weight < medium_threshold  -> "quick"  (light tier)
+
+    Thresholds are normalised to fractions (0-1) if they arrive as
+    percentage integers (e.g. 10 instead of 0.10) from the frontend.
     """
-    if weight >= settings.weight_heavy_threshold:
+    heavy = settings.weight_heavy_threshold
+    medium = settings.weight_medium_threshold
+
+    # Normalise: if thresholds look like percentages (> 1), convert to fractions
+    if heavy > 1:
+        heavy = heavy / 100.0
+    if medium > 1:
+        medium = medium / 100.0
+
+    if weight >= heavy:
         return "full"
-    elif weight >= settings.weight_medium_threshold:
+    elif weight >= medium:
         return "standard"
     else:
         return "quick"

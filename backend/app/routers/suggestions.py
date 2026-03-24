@@ -1,6 +1,6 @@
 """Stock suggestion endpoints.
 
-GET /api/suggestions -> list stock suggestions (with filters)
+GET /api/suggestions -> list stock suggestions (with filters and pagination)
 """
 
 from fastapi import APIRouter, Depends, Query
@@ -14,14 +14,16 @@ from app.schemas.suggestion import StockSuggestionResponse
 router = APIRouter(prefix="/api/suggestions", tags=["suggestions"])
 
 
-@router.get("", response_model=list[StockSuggestionResponse])
+@router.get("")
 def list_suggestions(
     status: str | None = Query(None),
     gap_type: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user_id: str = Depends(require_api_key),
-) -> list[StockSuggestionResponse]:
-    """List stock suggestions with optional filters."""
+) -> dict:
+    """List stock suggestions with optional filters and pagination."""
     query = db.query(StockSuggestion).filter(StockSuggestion.user_id == user_id)
 
     if status:
@@ -29,9 +31,16 @@ def list_suggestions(
     if gap_type:
         query = query.filter(StockSuggestion.gap_type == gap_type)
 
-    suggestions = query.order_by(StockSuggestion.created_at.desc()).all()
+    total = query.count()
+    suggestions = (
+        query
+        .order_by(StockSuggestion.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
-    return [
+    items = [
         StockSuggestionResponse(
             id=s.id,
             job_id=s.job_id,
@@ -51,6 +60,14 @@ def list_suggestions(
             status=s.status,
             status_changed_at=s.status_changed_at,
             created_at=s.created_at,
-        )
+        ).model_dump()
         for s in suggestions
     ]
+
+    return {
+        "data": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": (offset + limit) < total,
+    }

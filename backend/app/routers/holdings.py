@@ -11,7 +11,6 @@ POST   /api/holdings/import   -> CSV upload to bulk-create holdings
 import csv
 import io
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
@@ -27,12 +26,9 @@ from app.schemas.holding import (
     HoldingWithPrice,
 )
 from app.services.portfolio import get_holdings_with_prices
+from app.utils import utc_now
 
 router = APIRouter(prefix="/api/holdings", tags=["holdings"])
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 @router.get("/export")
@@ -98,7 +94,7 @@ async def import_holdings_csv(
 
     imported = 0
     errors: list[dict] = []
-    now = _now()
+    now = utc_now()
 
     for row_num, row in enumerate(reader, start=2):  # Row 1 is header
         ticker_raw = (row.get("ticker") or "").strip().upper()
@@ -202,7 +198,7 @@ def create_holding(
             },
         )
 
-    now = _now()
+    now = utc_now()
     holding = Holding(
         id=str(uuid.uuid4()),
         user_id=user_id,
@@ -316,7 +312,7 @@ def update_holding(
 
     for field, value in update_data.items():
         setattr(holding, field, value)
-    holding.updated_at = _now()
+    holding.updated_at = utc_now()
 
     db.commit()
     db.refresh(holding)
@@ -351,6 +347,6 @@ def delete_holding(
             },
         )
 
-    holding.deleted_at = _now()
-    holding.updated_at = _now()
+    holding.deleted_at = utc_now()
+    holding.updated_at = utc_now()
     db.commit()

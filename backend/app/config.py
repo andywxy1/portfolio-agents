@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     max_debate_rounds: int = 1
     max_risk_discuss_rounds: int = 1
 
+    # CORS
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ]
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

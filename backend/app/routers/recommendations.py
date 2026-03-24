@@ -5,7 +5,6 @@ PATCH /api/recommendations/:id   -> accept or dismiss a recommendation
 """
 
 import json
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -15,12 +14,9 @@ from app.middleware.auth import require_api_key
 from app.models.recommendation import Recommendation
 from app.schemas.common import PaginatedResponse
 from app.schemas.recommendation import RecommendationResponse, UpdateRecommendationRequest
+from app.utils import utc_now
 
 router = APIRouter(prefix="/api/recommendations", tags=["recommendations"])
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _to_response(r: Recommendation) -> RecommendationResponse:
@@ -129,7 +125,7 @@ def update_recommendation(
             },
         )
 
-    now = _now()
+    now = utc_now()
     rec.status = body.status
     rec.status_changed_at = now
     rec.status_note = body.status_note

@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
     id              TEXT PRIMARY KEY,                          -- UUID
     user_id         TEXT NOT NULL DEFAULT 'default',
     status          TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending', 'running', 'completed', 'failed')),
+                        CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+    mode            TEXT DEFAULT 'portfolio'
+                        CHECK (mode IN ('single', 'portfolio', 'all_individual')),
     tickers         TEXT NOT NULL,                             -- JSON array of tickers analyzed
     total_tickers   INTEGER NOT NULL DEFAULT 0,
     completed_tickers INTEGER NOT NULL DEFAULT 0,
@@ -118,7 +120,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     -- Order parameters
     order_type      TEXT NOT NULL CHECK (order_type IN ('market', 'limit', 'stop', 'stop_limit', 'conditional')),
     side            TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
-    quantity        REAL NOT NULL CHECK (quantity > 0),        -- shares to trade
+    quantity        REAL NOT NULL DEFAULT 1 CHECK (quantity > 0), -- shares to trade
     limit_price     REAL,                                      -- for limit / stop_limit orders
     stop_price      REAL,                                      -- for stop / stop_limit orders
     time_in_force   TEXT NOT NULL DEFAULT 'day'

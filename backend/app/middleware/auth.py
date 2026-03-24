@@ -29,8 +29,13 @@ def require_api_key(
     if not path.startswith("/api/"):
         return "default"
 
-    # Skip auth for config endpoints (setup flow needs these before a key exists)
-    if path.startswith("/api/config"):
+    # Skip auth for config status endpoint (needed for setup redirect check)
+    if path == "/api/config/status":
+        return "default"
+
+    # Skip auth for config endpoints ONLY when API key is still the default
+    # (first-time setup flow needs these before a real key is configured)
+    if path.startswith("/api/config") and settings.api_key == _DEFAULT_API_KEY:
         return "default"
 
     # Skip auth for health check

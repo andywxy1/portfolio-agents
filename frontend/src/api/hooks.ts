@@ -28,6 +28,7 @@ import type {
   ConfigStatus,
   ValidationResult,
   PriceData,
+  PnlHistoryEntry,
 } from '../types';
 
 const USE_MOCKS = import.meta.env.VITE_USE_MOCKS !== 'false';
@@ -157,12 +158,17 @@ export function useValidateTicker(ticker: string) {
 // Import / Export (Item 2)
 // ---------------------------------------------------------------------------
 
+function getAuthHeaders(): Record<string, string> {
+  const apiKey = import.meta.env.VITE_API_KEY ?? '';
+  return apiKey ? { 'X-API-Key': apiKey } : {};
+}
+
 export function useExportHoldings() {
   return useMutation<Blob, Error, void>({
     mutationFn: async () => {
       const response = await fetch('/api/holdings/export', {
         method: 'GET',
-        headers: { 'Content-Type': 'text/csv' },
+        headers: { 'Content-Type': 'text/csv', ...getAuthHeaders() },
       });
       if (!response.ok) throw new Error('Export failed');
       return response.blob();
@@ -178,6 +184,7 @@ export function useImportHoldings() {
       formData.append('file', file);
       const response = await fetch('/api/holdings/import', {
         method: 'POST',
+        headers: { ...getAuthHeaders() },
         body: formData,
       });
       if (!response.ok) {
@@ -284,14 +291,14 @@ export function useAnalysisHistory() {
 }
 
 export function usePnlHistory() {
-  return useQuery({
+  return useQuery<PnlHistoryEntry[]>({
     queryKey: ['pnl-history'],
     queryFn: async () => {
       if (USE_MOCKS) {
         await delay();
         return mockPnlHistory;
       }
-      return apiClient.get<typeof mockPnlHistory>('/portfolio/pnl-history');
+      return apiClient.get<PnlHistoryEntry[]>('/portfolio/pnl-history');
     },
   });
 }

@@ -3,7 +3,7 @@ import { useAnalysisJob } from '../../api/hooks';
 import { usePageTitle } from '../../hooks/usePageTitle';
 import { JobStatusBadge, SignalBadge } from '../../components/StatusBadge';
 import { formatRelativeTime } from '../../utils/format';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useToast } from '../../components/Toast';
 
 export default function AnalysisProgress() {
@@ -13,14 +13,21 @@ export default function AnalysisProgress() {
   const toast = useToast();
   const { data: job, isLoading, isError, error } = useAnalysisJob(jobId);
 
-  // Notify on completion
+  // Track which statuses we've already shown a toast for (Fix 8)
+  const toastedStatusRef = useRef<string | null>(null);
+
+  // Notify on completion - only fire once per terminal status
   useEffect(() => {
-    if (job?.status === 'completed') {
+    if (!job) return;
+    const status = job.status;
+    if (toastedStatusRef.current === status) return;
+    if (status === 'completed') {
+      toastedStatusRef.current = status;
       toast.success(`Analysis completed - ${job.completed_tickers} positions analyzed`);
-    } else if (job?.status === 'failed') {
+    } else if (status === 'failed') {
+      toastedStatusRef.current = status;
       toast.error(`Analysis failed: ${job.error_message ?? 'Unknown error'}`);
     }
-    // Only fire when status changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job?.status]);
 
@@ -65,13 +72,19 @@ export default function AnalysisProgress() {
   const isComplete = job.status === 'completed';
   const isFailed = job.status === 'failed';
 
+  const modeLabel = job.mode === 'all_individual'
+    ? 'Full Analysis (All Positions)'
+    : job.mode === 'single'
+    ? `Single Ticker: ${job.tickers[0] ?? ''}`
+    : 'Portfolio Analysis';
+
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Analysis Progress</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Analyzing {job.total_tickers} position{job.total_tickers !== 1 ? 's' : ''}
+          {modeLabel} -- {job.total_tickers} position{job.total_tickers !== 1 ? 's' : ''}
         </p>
       </div>
 

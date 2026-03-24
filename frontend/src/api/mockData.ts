@@ -48,7 +48,7 @@ export const mockRecommendations: Recommendation[] = [];
 
 export const mockSuggestions: StockSuggestion[] = [];
 
-export const mockPnlHistory: { date: string; value: number; pnl: number; pnl_pct: number }[] = [];
+export const mockPnlHistory: { date: string; total_value: number; total_cost: number; pnl: number; pnl_pct: number }[] = [];
 
 export const mockLatestAnalysis: LatestAnalysisResponse = {
   job: null,

@@ -9,6 +9,7 @@ class AnalysisJob(Base):
     id = Column(String, primary_key=True)
     user_id = Column(String, nullable=False, default="default")
     status = Column(String, nullable=False, default="pending")
+    mode = Column(String, nullable=True, default="portfolio")
     tickers = Column(Text, nullable=False)  # JSON array
     total_tickers = Column(Integer, nullable=False, default=0)
     completed_tickers = Column(Integer, nullable=False, default=0)
