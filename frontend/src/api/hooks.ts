@@ -20,6 +20,7 @@ import type {
   StartAnalysisRequest,
   StartAnalysisResponse,
   LatestAnalysisResponse,
+  PositionAnalysis,
   Recommendation,
   UpdateRecommendationRequest,
   PaginatedResponse,
@@ -285,7 +286,10 @@ export function useAnalysisHistory() {
         await delay();
         return mockAnalysisJobs;
       }
-      return apiClient.get<AnalysisJob[]>('/analysis/jobs');
+      // Backend returns paginated wrapper { data: [...], total, ... }
+      const resp = await apiClient.get<{ data: AnalysisJob[] } | AnalysisJob[]>('/analysis/jobs');
+      if (Array.isArray(resp)) return resp;
+      return resp?.data ?? [];
     },
   });
 }
@@ -359,7 +363,10 @@ export function useSuggestions() {
         await delay();
         return mockSuggestions;
       }
-      return apiClient.get<StockSuggestion[]>('/suggestions');
+      // Backend returns paginated wrapper { data: [...], total, ... }
+      const resp = await apiClient.get<{ data: StockSuggestion[] } | StockSuggestion[]>('/suggestions');
+      if (Array.isArray(resp)) return resp;
+      return resp?.data ?? [];
     },
   });
 }
@@ -369,7 +376,7 @@ export function useSuggestions() {
 // ---------------------------------------------------------------------------
 
 export function usePositionAnalyses() {
-  return useQuery({
+  return useQuery<PositionAnalysis[]>({
     queryKey: ['position-analyses'],
     queryFn: async () => {
       if (USE_MOCKS) {
@@ -377,7 +384,9 @@ export function usePositionAnalyses() {
         return mockPositionAnalyses;
       }
       const latest = await apiClient.get<LatestAnalysisResponse>('/analysis/latest');
-      return latest.position_analyses;
+      // Defensively ensure we always return an array
+      const analyses = latest?.position_analyses;
+      return Array.isArray(analyses) ? analyses : [];
     },
   });
 }

@@ -13,7 +13,7 @@ import {
   formatRelativeTime,
   formatCompactCurrency,
 } from '../../utils/format';
-import type { StockSuggestion } from '../../types';
+import type { Recommendation, StockSuggestion } from '../../types';
 
 const STATUS_FILTERS: { label: string; value: string | undefined }[] = [
   { label: 'All', value: undefined },
@@ -37,10 +37,13 @@ export default function Recommendations() {
   // Confirm dialog for dismiss (Item 7)
   const [dismissConfirm, setDismissConfirm] = useState<string | null>(null);
 
-  const recommendations = recsData?.data ?? [];
+  const recommendations: Recommendation[] = Array.isArray(recsData?.data) ? recsData.data : [];
+
+  // Defensive: ensure suggestions is always an array
+  const suggestionsList = Array.isArray(suggestions) ? suggestions : [];
 
   // Empty state check (Item 14)
-  const isAllEmpty = !recsLoading && !sugLoading && recommendations.length === 0 && (!suggestions || suggestions.length === 0) && !statusFilter;
+  const isAllEmpty = !recsLoading && !sugLoading && recommendations.length === 0 && suggestionsList.length === 0 && !statusFilter;
 
   return (
     <div className="space-y-8">
@@ -203,11 +206,11 @@ export default function Recommendations() {
               <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-center">
                 <p className="text-sm text-red-700">Failed to load suggestions</p>
               </div>
-            ) : !suggestions || suggestions.length === 0 ? (
+            ) : suggestionsList.length === 0 ? (
               <EmptyState title="No suggestions" description="Suggestions are generated during analysis." />
             ) : (
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {suggestions.map(s => (
+                {suggestionsList.map(s => (
                   <SuggestionCard key={s.id} suggestion={s} />
                 ))}
               </div>

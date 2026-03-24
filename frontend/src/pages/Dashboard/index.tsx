@@ -278,7 +278,7 @@ export default function Dashboard() {
                   </div>
                 )}
 
-                {latest?.recommendations && latest.recommendations.length > 0 && (
+                {Array.isArray(latest?.recommendations) && latest.recommendations.length > 0 && (
                   <div className="rounded-lg border border-gray-100 bg-gray-50 p-4">
                     <p className="text-sm font-medium text-gray-900">Pending Recommendations</p>
                     <p className="mt-1 text-xs text-gray-500">
@@ -287,7 +287,7 @@ export default function Dashboard() {
                   </div>
                 )}
 
-                {!latest?.job && !latest?.recommendations?.length && (
+                {!latest?.job && !(Array.isArray(latest?.recommendations) && latest.recommendations.length > 0) && (
                   <p className="text-sm text-gray-400">No recent activity. Run an analysis to get started.</p>
                 )}
 

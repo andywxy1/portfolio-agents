@@ -26,8 +26,11 @@ export default function History() {
   const { data: pnlHistory, isLoading: pnlLoading, error: pnlError } = usePnlHistory();
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
 
+  // Defensive: ensure jobs is always an array (backend may return paginated wrapper)
+  const jobsList = Array.isArray(jobs) ? jobs : [];
+
   // Fully empty state (Item 14)
-  if (!jobsLoading && !pnlLoading && (!jobs || jobs.length === 0) && (!pnlHistory || pnlHistory.length === 0)) {
+  if (!jobsLoading && !pnlLoading && jobsList.length === 0 && (!pnlHistory || pnlHistory.length === 0)) {
     return (
       <div className="space-y-6">
         <div>
@@ -165,11 +168,11 @@ export default function History() {
           <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-center">
             <p className="text-sm text-red-700">Failed to load analysis history</p>
           </div>
-        ) : !jobs || jobs.length === 0 ? (
+        ) : jobsList.length === 0 ? (
           <EmptyState title="No analysis history" description="Run an analysis from the Holdings page." />
         ) : (
           <div className="space-y-3">
-            {jobs.map(job => (
+            {jobsList.map(job => (
               <JobCard
                 key={job.id}
                 job={job}

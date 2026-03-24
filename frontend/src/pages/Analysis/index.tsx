@@ -63,8 +63,11 @@ export default function Analysis() {
     );
   }
 
+  // Defensive: ensure analyses is always an array
+  const analysesList = Array.isArray(analyses) ? analyses : [];
+
   // Empty state (Item 14)
-  if (!analyses || analyses.length === 0) {
+  if (analysesList.length === 0) {
     return (
       <div className="space-y-6">
         <div>
@@ -80,14 +83,14 @@ export default function Analysis() {
     );
   }
 
-  const selected = analyses.find(a => a.ticker === selectedTicker) ?? analyses[0];
+  const selected = analysesList.find(a => a.ticker === selectedTicker) ?? analysesList[0];
 
   return (
     <div className="flex h-[calc(100vh-3rem)] gap-6">
       {/* Left sidebar - position list */}
       <div className="w-64 flex-shrink-0 space-y-1 overflow-y-auto">
         <h2 className="px-2 text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Positions</h2>
-        {analyses.map(a => (
+        {analysesList.map(a => (
           <button
             key={a.ticker}
             onClick={() => setSelectedTicker(a.ticker)}
