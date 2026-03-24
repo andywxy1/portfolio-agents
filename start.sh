@@ -130,7 +130,7 @@ fi
 # --------------------------------------------------------------------------
 PORT=8000
 if [ -f "backend/.env" ]; then
-    ENV_PORT=$(grep -E '^PORT=' backend/.env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+    ENV_PORT=$(grep -E '^PORT=' backend/.env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]"'"'")
     if [ -n "$ENV_PORT" ]; then
         PORT="$ENV_PORT"
     fi
