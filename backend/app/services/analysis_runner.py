@@ -32,7 +32,7 @@ from app.services.event_stream import (
     create_event_stream,
     get_event_stream,
 )
-from app.services.pipeline_adapter import PipelineAdapter
+from app.services.pipeline_adapter import AnalysisCancelledError, PipelineAdapter
 from app.services.portfolio import TICKER_SECTOR_MAP, get_sector
 from app.services.recommendation_generator import generate_recommendations
 from app.services.suggestion import generate_suggestions
@@ -194,8 +194,13 @@ class AnalysisRunner:
                 # Run analysis via the tiered adapter (blocking).
                 # Use the streaming variant when an event stream exists so
                 # that SSE clients get live progress updates.
+                # Pass a cancellation checker so graph.stream() chunks can
+                # be interrupted mid-ticker (not just between tickers).
                 result = self._adapter.analyze_ticker_streaming(
-                    ticker, depth, event_stream=event_stream,
+                    ticker,
+                    depth,
+                    event_stream=event_stream,
+                    cancel_check=lambda: self._is_cancelled(job_id),
                 )
 
                 # Check for pipeline-level errors
@@ -259,6 +264,41 @@ class AnalysisRunner:
                         "tickers_completed": completed_count,
                         "tickers_total": len(tickers),
                     })
+
+            except AnalysisCancelledError:
+                logger.info(
+                    "Analysis cancelled mid-ticker for %s in job %s",
+                    ticker,
+                    job_id,
+                )
+                # Mark the in-progress position analysis as cancelled
+                pa_row = (
+                    db.query(PositionAnalysis)
+                    .filter(
+                        PositionAnalysis.job_id == job_id,
+                        PositionAnalysis.ticker == ticker,
+                    )
+                    .first()
+                )
+                if pa_row and pa_row.status == "running":
+                    pa_row.status = "failed"
+                    pa_row.error_message = "Cancelled by user"
+                    pa_row.completed_at = utc_now()
+                db.commit()
+
+                # Mark the job as cancelled and exit the ticker loop
+                job.status = "cancelled"
+                job.completed_at = utc_now()
+                job.error_message = "Cancelled by user"
+                db.commit()
+                if event_stream:
+                    event_stream.emit("job_status", {
+                        "status": "cancelled",
+                        "tickers_completed": completed_count,
+                        "tickers_total": len(tickers),
+                    })
+                logger.info("Job %s cancelled by user (mid-ticker)", job_id)
+                return
 
             except Exception:
                 logger.exception(

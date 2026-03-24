@@ -16,7 +16,7 @@ import logging
 import os
 import traceback
 from datetime import date
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
 
@@ -24,6 +24,11 @@ from app.config import settings
 
 if TYPE_CHECKING:
     from app.services.event_stream import AnalysisEventStream
+
+
+class AnalysisCancelledError(Exception):
+    """Raised when an analysis is cancelled mid-execution."""
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -397,10 +402,18 @@ class PipelineAdapter:
         depth: str = "full",
         trade_date: Optional[str] = None,
         event_stream: Optional[AnalysisEventStream] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> dict[str, Any]:
         """Run analysis with live event streaming.
 
         Falls back to the non-streaming path when *event_stream* is None.
+
+        Parameters
+        ----------
+        cancel_check
+            Optional callable that returns ``True`` when the job has been
+            cancelled.  Checked between graph stream chunks so that
+            long-running single-ticker analyses can be interrupted.
         """
         if event_stream is None:
             return self.analyze_ticker(ticker, depth, trade_date)
@@ -427,6 +440,7 @@ class PipelineAdapter:
             max_debate_rounds=debate_rounds,
             max_risk_discuss_rounds=risk_rounds,
             event_stream=event_stream,
+            cancel_check=cancel_check,
         )
 
     # ------------------------------------------------------------------
@@ -442,6 +456,7 @@ class PipelineAdapter:
         max_debate_rounds: int,
         max_risk_discuss_rounds: int,
         event_stream: AnalysisEventStream,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> dict[str, Any]:
         """Stream the LangGraph execution, emitting events for each node.
 
@@ -505,6 +520,17 @@ class PipelineAdapter:
                 config=stream_config,
             ):
                 chunk_count += 1
+
+                # Check for cancellation between graph chunks
+                if cancel_check is not None and cancel_check():
+                    logger.info(
+                        "[streaming] Cancellation detected for %s after %d chunks",
+                        ticker,
+                        chunk_count,
+                    )
+                    raise AnalysisCancelledError(
+                        f"Analysis of {ticker} cancelled by user"
+                    )
 
                 # With stream_mode="updates", chunk is {node_name: state_delta}
                 if not isinstance(chunk, dict):

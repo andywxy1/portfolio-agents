@@ -285,6 +285,11 @@ export function useAnalysisStream(jobId: string | undefined) {
           tickersCompleted: d.tickers_completed ?? 0,
           tickersTotal: d.tickers_total ?? 0,
         });
+        // Detect terminal statuses so the UI updates immediately
+        // (without waiting for the SSE 'done' event or polling)
+        if (d.status === 'cancelled' || d.status === 'completed' || d.status === 'failed') {
+          setIsComplete(true);
+        }
       });
 
       onSSE(es, 'error', (raw) => {
