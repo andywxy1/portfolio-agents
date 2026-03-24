@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { apiClient } from './client';
+import { apiClient, getConfigStatus, getConfig, updateConfig, validateConfig } from './client';
 import {
   mockStore,
   mockPortfolioSummary,
@@ -24,6 +24,9 @@ import type {
   UpdateRecommendationRequest,
   PaginatedResponse,
   StockSuggestion,
+  AppConfig,
+  ConfigStatus,
+  ValidationResult,
 } from '../types';
 
 const USE_MOCKS = import.meta.env.VITE_USE_MOCKS !== 'false';
@@ -278,5 +281,43 @@ export function usePositionAnalyses() {
       const latest = await apiClient.get<LatestAnalysisResponse>('/analysis/latest');
       return latest.position_analyses;
     },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+export function useConfigStatus() {
+  return useQuery<ConfigStatus>({
+    queryKey: ['config-status'],
+    queryFn: getConfigStatus,
+    retry: false,
+    staleTime: 0,
+  });
+}
+
+export function useConfig() {
+  return useQuery<AppConfig>({
+    queryKey: ['config'],
+    queryFn: getConfig,
+    retry: false,
+  });
+}
+
+export function useUpdateConfig() {
+  const qc = useQueryClient();
+  return useMutation<AppConfig, Error, Partial<AppConfig>>({
+    mutationFn: updateConfig,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['config'] });
+      qc.invalidateQueries({ queryKey: ['config-status'] });
+    },
+  });
+}
+
+export function useValidateConfig() {
+  return useMutation<ValidationResult, Error, Partial<AppConfig>>({
+    mutationFn: validateConfig,
   });
 }

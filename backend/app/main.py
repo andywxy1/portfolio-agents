@@ -1,20 +1,24 @@
 """FastAPI application entry point.
 
-Configures CORS, registers routers, and initializes the database on startup.
+Configures CORS, registers routers, serves the frontend SPA,
+and initializes the database on startup.
 """
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.database import init_db
 from app.routers import (
     analysis,
+    config,
     holdings,
     portfolio,
     prices,
@@ -62,6 +66,7 @@ app.add_middleware(
 )
 
 # Register routers
+app.include_router(config.router)
 app.include_router(holdings.router)
 app.include_router(analysis.router)
 app.include_router(recommendations.router)
@@ -90,3 +95,24 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 async def health_check() -> dict:
     """Health check endpoint (no auth required)."""
     return {"status": "ok", "version": "1.0.0"}
+
+
+# ---------------------------------------------------------------------------
+# Serve the frontend SPA (must be registered AFTER all API routers)
+# ---------------------------------------------------------------------------
+_frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
+
+if _frontend_dist.exists():
+    # Serve /assets (JS, CSS, images) as static files
+    _assets_dir = _frontend_dist / "assets"
+    if _assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str) -> FileResponse:
+        """Serve index.html for all non-API, non-asset routes (SPA routing)."""
+        # If the exact file exists in dist (e.g. favicon.ico), serve it directly
+        file_path = _frontend_dist / full_path
+        if full_path and file_path.exists() and file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(_frontend_dist / "index.html")

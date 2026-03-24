@@ -388,3 +388,30 @@ export interface GetSuggestionsParams {
   status?: SuggestionStatus;
   gap_type?: GapType;
 }
+
+// ---------------------------------------------------------------------------
+// App Configuration
+// ---------------------------------------------------------------------------
+
+export interface AppConfig {
+  api_key: string;
+  alpaca_api_key: string;
+  alpaca_secret_key: string;
+  alpaca_base_url: string;
+  llm_base_url: string;
+  llm_api_key: string;
+  llm_deep_model: string;
+  llm_quick_model: string;
+  weight_heavy_threshold: number;
+  weight_medium_threshold: number;
+}
+
+export interface ConfigStatus {
+  configured: boolean;
+  missing_keys: string[];
+}
+
+export interface ValidationResult {
+  alpaca: { ok: boolean; error?: string };
+  llm: { ok: boolean; error?: string };
+}

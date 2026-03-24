@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_deep_model: str = "claude-sonnet-4-20250514"
     llm_quick_model: str = "claude-sonnet-4-20250514"
+    openai_api_key: str = ""
 
     # Analysis thresholds
     weight_heavy_threshold: float = 0.10

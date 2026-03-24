@@ -84,3 +84,25 @@ export class ApiRequestError extends Error {
 }
 
 export const apiClient = new ApiClient();
+
+// ---------------------------------------------------------------------------
+// Config API helpers
+// ---------------------------------------------------------------------------
+
+import type { AppConfig, ConfigStatus, ValidationResult } from '../types';
+
+export function getConfigStatus(): Promise<ConfigStatus> {
+  return apiClient.get<ConfigStatus>('/config/status');
+}
+
+export function getConfig(): Promise<AppConfig> {
+  return apiClient.get<AppConfig>('/config');
+}
+
+export function updateConfig(data: Partial<AppConfig>): Promise<AppConfig> {
+  return apiClient.put<AppConfig>('/config', data);
+}
+
+export function validateConfig(data: Partial<AppConfig>): Promise<ValidationResult> {
+  return apiClient.post<ValidationResult>('/config/validate', data);
+}
