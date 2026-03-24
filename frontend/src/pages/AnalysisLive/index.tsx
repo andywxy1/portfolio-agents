@@ -1,7 +1,8 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { usePageTitle } from '../../hooks/usePageTitle';
-import { useAnalysisJob } from '../../api/hooks';
+import { useToast } from '../../components/Toast';
+import { useAnalysisJob, useCancelAnalysis } from '../../api/hooks';
 import {
   useAnalysisStream,
   AGENT_PIPELINE,
@@ -559,6 +560,8 @@ export default function AnalysisLive() {
   usePageTitle('Live Analysis');
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
+  const toast = useToast();
+  const cancelMutation = useCancelAnalysis();
 
   // SSE stream
   const {
@@ -651,6 +654,22 @@ export default function AnalysisLive() {
   const activeStages = stagesByTicker.get(activeTicker) ?? stagesByTicker.get('_all') ?? new Map();
   const activeReports = reportsByTicker.get(activeTicker) ?? reportsByTicker.get('_all') ?? new Map();
   const activeDecision = decisions.get(activeTicker);
+
+  // Is the analysis still active (not finished)?
+  const jobStatus = job?.status;
+  const isRunning = !isComplete && jobStatus !== 'failed' && jobStatus !== 'cancelled';
+
+  const handleStopAnalysis = useCallback(() => {
+    if (!jobId) return;
+    cancelMutation.mutate(jobId, {
+      onSuccess: () => {
+        toast.success('Analysis cancellation requested');
+      },
+      onError: (err) => {
+        toast.error(`Failed to cancel: ${err.message}`);
+      },
+    });
+  }, [jobId, cancelMutation, toast]);
 
   // Progress computation
   const totalTickers = jobProgress.tickersTotal || job?.total_tickers || allTickers.length || 0;
@@ -771,6 +790,18 @@ export default function AnalysisLive() {
           >
             {soundEnabled ? '\uD83D\uDD14' : '\uD83D\uDD15'}
           </button>
+
+          {/* Stop Analysis button - only shown when analysis is active */}
+          {isRunning && (
+            <button
+              onClick={handleStopAnalysis}
+              disabled={cancelMutation.isPending}
+              className="px-3 py-1 rounded bg-red-600 hover:bg-red-500 disabled:opacity-50 text-xs font-semibold text-white transition-colors"
+              aria-label="Stop analysis"
+            >
+              {cancelMutation.isPending ? 'Stopping...' : 'Stop Analysis'}
+            </button>
+          )}
 
           {/* Copy all reports */}
           <button

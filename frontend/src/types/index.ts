@@ -67,7 +67,7 @@ export interface HoldingWithPrice extends Holding {
 // Analysis Jobs
 // ---------------------------------------------------------------------------
 
-export type AnalysisJobStatus = "pending" | "running" | "completed" | "failed";
+export type AnalysisJobStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type AnalysisDepth = "full" | "standard" | "quick";
 export type Signal = "BUY" | "OVERWEIGHT" | "HOLD" | "UNDERWEIGHT" | "SELL";
 

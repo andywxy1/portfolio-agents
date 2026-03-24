@@ -75,13 +75,42 @@ def _add_mode_column_if_missing() -> None:
         db.close()
 
 
+def _recover_stuck_jobs() -> None:
+    """Mark any pending/running jobs as failed.
+
+    These are zombie jobs left over from a previous process crash or
+    ungraceful shutdown.  Without this, the 409 rate-limit would block
+    users from starting new analyses.
+    """
+    db = SessionLocal()
+    try:
+        result = db.execute(
+            text(
+                "UPDATE analysis_jobs "
+                "SET status = 'failed', "
+                "    error_message = 'Server restarted during analysis', "
+                "    completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE status IN ('pending', 'running')"
+            )
+        )
+        db.commit()
+        if result.rowcount:
+            logger.info("Recovered %d stuck analysis job(s)", result.rowcount)
+    except Exception:
+        logger.exception("Failed to recover stuck jobs")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application startup and shutdown lifecycle."""
     logger.info("Initializing database...")
     init_db()
     _add_mode_column_if_missing()
-    logger.info("Database initialized. Cleaning up stale cache...")
+    logger.info("Database initialized. Recovering stuck jobs...")
+    _recover_stuck_jobs()
+    logger.info("Cleaning up stale cache...")
     _cleanup_stale_price_cache()
     logger.info("Server ready.")
     yield

@@ -7,19 +7,25 @@ import type { ReactNode } from 'react';
 
 type ToastVariant = 'success' | 'error' | 'info' | 'warning';
 
+interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 interface ToastItem {
   id: string;
   message: string;
   variant: ToastVariant;
   duration: number;
+  action?: ToastAction;
 }
 
 interface ToastContextValue {
-  addToast: (message: string, variant?: ToastVariant, duration?: number) => void;
-  success: (message: string) => void;
-  error: (message: string) => void;
-  info: (message: string) => void;
-  warning: (message: string) => void;
+  addToast: (message: string, variant?: ToastVariant, duration?: number, action?: ToastAction) => void;
+  success: (message: string, options?: { action?: ToastAction }) => void;
+  error: (message: string, options?: { action?: ToastAction; duration?: number }) => void;
+  info: (message: string, options?: { action?: ToastAction }) => void;
+  warning: (message: string, options?: { action?: ToastAction }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -41,19 +47,19 @@ export function useToast(): ToastContextValue {
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
-  const addToast = useCallback((message: string, variant: ToastVariant = 'info', duration = 4000) => {
+  const addToast = useCallback((message: string, variant: ToastVariant = 'info', duration = 4000, action?: ToastAction) => {
     const id = crypto.randomUUID();
-    setToasts(prev => [...prev, { id, message, variant, duration }]);
+    setToasts(prev => [...prev, { id, message, variant, duration, action }]);
   }, []);
 
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
 
-  const success = useCallback((message: string) => addToast(message, 'success'), [addToast]);
-  const error = useCallback((message: string) => addToast(message, 'error', 6000), [addToast]);
-  const info = useCallback((message: string) => addToast(message, 'info'), [addToast]);
-  const warning = useCallback((message: string) => addToast(message, 'warning'), [addToast]);
+  const success = useCallback((message: string, options?: { action?: ToastAction }) => addToast(message, 'success', 4000, options?.action), [addToast]);
+  const error = useCallback((message: string, options?: { action?: ToastAction; duration?: number }) => addToast(message, 'error', options?.duration ?? 6000, options?.action), [addToast]);
+  const info = useCallback((message: string, options?: { action?: ToastAction }) => addToast(message, 'info', 4000, options?.action), [addToast]);
+  const warning = useCallback((message: string, options?: { action?: ToastAction }) => addToast(message, 'warning', 4000, options?.action), [addToast]);
 
   return (
     <ToastContext.Provider value={{ addToast, success, error, info, warning }}>
@@ -115,6 +121,19 @@ function ToastCard({ toast, onDismiss }: { toast: ToastItem; onDismiss: (id: str
         <path strokeLinecap="round" strokeLinejoin="round" d={variantIcons[toast.variant]} />
       </svg>
       <p className="flex-1 text-sm font-medium">{toast.message}</p>
+      {toast.action && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            toast.action!.onClick();
+            setVisible(false);
+            setTimeout(() => onDismiss(toast.id), 200);
+          }}
+          className="flex-shrink-0 rounded px-2 py-1 text-xs font-semibold bg-white/20 hover:bg-white/30 transition-colors"
+        >
+          {toast.action.label}
+        </button>
+      )}
       <button
         onClick={() => {
           setVisible(false);

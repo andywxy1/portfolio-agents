@@ -242,6 +242,22 @@ export function useStartAnalysis() {
   });
 }
 
+export function useCancelAnalysis() {
+  const qc = useQueryClient();
+  return useMutation<{ status: string; job_id: string }, Error, string>({
+    mutationFn: async (jobId) => {
+      if (USE_MOCKS) {
+        await delay(300);
+        return { status: 'cancellation_requested', job_id: jobId };
+      }
+      return apiClient.post<{ status: string; job_id: string }>(`/analysis/cancel/${jobId}`);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['analysis'] });
+    },
+  });
+}
+
 export function useAnalysisJob(jobId: string | undefined) {
   return useQuery<AnalysisJob>({
     queryKey: ['analysis', 'job', jobId],

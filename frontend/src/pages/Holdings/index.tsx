@@ -15,11 +15,13 @@ import {
   useUpdateHolding,
   useDeleteHolding,
   useStartAnalysis,
+  useCancelAnalysis,
   useBatchPrices,
   useValidateTicker,
   useExportHoldings,
   useImportHoldings,
 } from '../../api/hooks';
+import { ApiRequestError } from '../../api/client';
 import { SkeletonTable } from '../../components/Skeleton';
 import { EmptyState } from '../../components/EmptyState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -44,6 +46,7 @@ export default function Holdings() {
   const updateMutation = useUpdateHolding();
   const deleteMutation = useDeleteHolding();
   const analysisMutation = useStartAnalysis();
+  const cancelMutation = useCancelAnalysis();
   const exportMutation = useExportHoldings();
   const importMutation = useImportHoldings();
 
@@ -250,11 +253,32 @@ export default function Holdings() {
           navigate(`/analysis/progress/${result.job_id}`);
         },
         onError: (err) => {
-          toast.error(`Analysis failed: ${err.message}`);
+          if (err instanceof ApiRequestError && err.status === 409) {
+            const activeJobId = err.details.active_job_id as string | undefined;
+            toast.warning('Analysis already running', {
+              action: activeJobId ? {
+                label: 'Cancel it',
+                onClick: () => {
+                  cancelMutation.mutate(activeJobId, {
+                    onSuccess: () => {
+                      toast.info('Previous analysis cancelled. Retrying...');
+                      // Retry after a short delay to let the backend settle
+                      setTimeout(() => handleStartAnalysis(mode, ticker), 500);
+                    },
+                    onError: (cancelErr) => {
+                      toast.error(`Failed to cancel: ${cancelErr.message}`);
+                    },
+                  });
+                },
+              } : undefined,
+            });
+          } else {
+            toast.error(`Analysis failed: ${err.message}`);
+          }
         },
       }
     );
-  }, [analysisMutation, navigate, toast]);
+  }, [analysisMutation, cancelMutation, navigate, toast]);
 
   // Check for any stale prices (Item 16)
   const hasStalePrice = useMemo(

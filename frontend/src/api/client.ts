@@ -31,10 +31,12 @@ class ApiClient {
       const errorBody = await response.json().catch(() => ({
         error: { code: 'UNKNOWN', message: response.statusText },
       }));
+      const errorObj = errorBody.error ?? {};
       throw new ApiRequestError(
         response.status,
-        errorBody.error?.code ?? 'UNKNOWN',
-        errorBody.error?.message ?? response.statusText
+        errorObj.code ?? 'UNKNOWN',
+        errorObj.message ?? response.statusText,
+        errorObj
       );
     }
 
@@ -74,12 +76,14 @@ class ApiClient {
 export class ApiRequestError extends Error {
   status: number;
   code: string;
+  details: Record<string, unknown>;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, details: Record<string, unknown> = {}) {
     super(message);
     this.name = 'ApiRequestError';
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 

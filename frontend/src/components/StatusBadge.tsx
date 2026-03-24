@@ -34,6 +34,8 @@ function getJobStatusVariant(status: AnalysisJobStatus): BadgeVariant {
       return 'yellow';
     case 'failed':
       return 'red';
+    case 'cancelled':
+      return 'gray';
   }
 }
 
