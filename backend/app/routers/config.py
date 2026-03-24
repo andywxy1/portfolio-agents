@@ -139,7 +139,10 @@ class ConfigUpdate(BaseModel):
 @router.put("")
 async def update_config(body: ConfigUpdate) -> dict[str, Any]:
     """Update configuration values, write to .env, and reload."""
-    updates = body.model_dump(exclude_unset=True)
+    raw = body.model_dump(exclude_unset=True)
+
+    # Normalize keys to uppercase (frontend sends lowercase)
+    updates = {k.upper(): v for k, v in raw.items()}
 
     # Validate keys
     invalid_keys = set(updates.keys()) - _ALLOWED_KEYS
@@ -153,6 +156,10 @@ async def update_config(body: ConfigUpdate) -> dict[str, Any]:
                 }
             },
         )
+
+    # Auto-set OPENAI_API_KEY when LLM_API_KEY is provided
+    if "LLM_API_KEY" in updates and "OPENAI_API_KEY" not in updates:
+        updates["OPENAI_API_KEY"] = updates["LLM_API_KEY"]
 
     # Read existing .env, merge, write back
     env_vars = _read_env_file()
