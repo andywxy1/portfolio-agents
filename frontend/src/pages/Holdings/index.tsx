@@ -49,6 +49,7 @@ export default function Holdings() {
 
   // Price polling (Item 1)
   const tickers = useMemo(() => (holdings ?? []).map(h => h.ticker), [holdings]);
+  // Batch price polling — keeps React Query cache fresh, triggers re-render via holdings invalidation
   useBatchPrices(tickers, tickers.length > 0);
 
   const [sorting, setSorting] = useState<SortingState>([]);

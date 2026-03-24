@@ -117,12 +117,13 @@ export function useDeleteHolding() {
 // ---------------------------------------------------------------------------
 
 export function useBatchPrices(tickers: string[], enabled = true) {
-  return useQuery<PriceData[]>({
+  return useQuery<Record<string, PriceData>>({
     queryKey: ['prices', 'batch', tickers],
     queryFn: async () => {
-      if (USE_MOCKS || tickers.length === 0) return [];
-      const qs = tickers.map(t => `tickers=${encodeURIComponent(t)}`).join('&');
-      return apiClient.get<PriceData[]>(`/prices/batch?${qs}`);
+      if (USE_MOCKS || tickers.length === 0) return {};
+      const qs = `tickers=${tickers.map(t => encodeURIComponent(t)).join(',')}`;
+      const resp = await apiClient.get<{ prices: Record<string, PriceData> }>(`/prices/batch?${qs}`);
+      return resp.prices;
     },
     enabled: enabled && tickers.length > 0,
     refetchInterval: 30_000, // Poll every 30 seconds
