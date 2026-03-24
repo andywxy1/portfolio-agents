@@ -192,17 +192,31 @@ class ValidateResponse(BaseModel):
     llm: _ConnectionResult
 
 
+class ValidateRequest(BaseModel):
+    """Optional overrides — use form values instead of saved settings."""
+    alpaca_api_key: str | None = None
+    alpaca_secret_key: str | None = None
+    alpaca_base_url: str | None = None
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
+    llm_quick_model: str | None = None
+
+
 @router.post("/validate", response_model=ValidateResponse)
-async def validate_connections() -> ValidateResponse:
-    """Test Alpaca and LLM connections and report results."""
-    alpaca_result = _test_alpaca()
-    llm_result = _test_llm()
+async def validate_connections(body: ValidateRequest | None = None) -> ValidateResponse:
+    """Test Alpaca and LLM connections. Uses request body values if provided, else saved settings."""
+    overrides = body.model_dump(exclude_none=True) if body else {}
+    alpaca_result = _test_alpaca(overrides)
+    llm_result = _test_llm(overrides)
     return ValidateResponse(alpaca=alpaca_result, llm=llm_result)
 
 
-def _test_alpaca() -> _ConnectionResult:
+def _test_alpaca(overrides: dict) -> _ConnectionResult:
     """Try fetching an AAPL quote via Alpaca."""
-    if not settings.alpaca_api_key or not settings.alpaca_secret_key:
+    api_key = overrides.get("alpaca_api_key") or settings.alpaca_api_key
+    secret_key = overrides.get("alpaca_secret_key") or settings.alpaca_secret_key
+
+    if not api_key or not secret_key:
         return _ConnectionResult(ok=False, error="Alpaca API key or secret key not configured")
 
     try:
@@ -210,8 +224,8 @@ def _test_alpaca() -> _ConnectionResult:
         from alpaca.data.requests import StockLatestQuoteRequest
 
         client = StockHistoricalDataClient(
-            api_key=settings.alpaca_api_key,
-            secret_key=settings.alpaca_secret_key,
+            api_key=api_key,
+            secret_key=secret_key,
         )
         request = StockLatestQuoteRequest(symbol_or_symbols="AAPL")
         quotes = client.get_stock_latest_quote(request)
@@ -224,19 +238,20 @@ def _test_alpaca() -> _ConnectionResult:
         return _ConnectionResult(ok=False, error=str(exc)[:200])
 
 
-def _test_llm() -> _ConnectionResult:
+def _test_llm(overrides: dict) -> _ConnectionResult:
     """Try a simple chat completion against the configured LLM endpoint."""
-    if not settings.llm_base_url:
+    base_url = overrides.get("llm_base_url") or settings.llm_base_url
+    api_key = overrides.get("llm_api_key") or settings.llm_api_key or settings.openai_api_key or "no-key"
+    model = overrides.get("llm_quick_model") or settings.llm_quick_model
+
+    if not base_url:
         return _ConnectionResult(ok=False, error="LLM base URL not configured")
 
     try:
         import httpx
 
-        api_key = settings.llm_api_key or settings.openai_api_key or "no-key"
-        model = settings.llm_quick_model
-
         response = httpx.post(
-            f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+            f"{base_url.rstrip('/')}/chat/completions",
             json={
                 "model": model,
                 "messages": [{"role": "user", "content": "say hello"}],
