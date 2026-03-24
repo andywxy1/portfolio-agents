@@ -118,7 +118,7 @@ class _StreamingCallbackHandler(BaseCallbackHandler):
 # Analyst sets per tier
 # ---------------------------------------------------------------------------
 _ANALYSTS_HEAVY = ["market", "social", "news", "fundamentals"]
-_ANALYSTS_MEDIUM = ["market", "fundamentals"]
+_ANALYSTS_MEDIUM = ["market", "social", "fundamentals"]
 _ANALYSTS_LIGHT = ["fundamentals"]
 
 # Map LangGraph node names (as defined in setup.py) to (team, display_name).
