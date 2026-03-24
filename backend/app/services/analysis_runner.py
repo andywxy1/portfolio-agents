@@ -3,7 +3,8 @@
 Uses ThreadPoolExecutor with a single worker to serialize analysis jobs.
 Each job:
   1. Determines per-ticker analysis depth from portfolio weight.
-  2. Runs tiered analysis via PipelineAdapter (heavy/medium/light).
+  2. Runs tiered analysis via PipelineAdapter (heavy/medium/light)
+     in parallel using a configurable thread pool.
   3. Generates portfolio-level synthesis and order recommendations
      via LLM function calling.
   4. Runs sector-gap suggestion engine.
@@ -14,8 +15,9 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -102,6 +104,7 @@ class AnalysisRunner:
     def _execute(self, db: Session, job_id: str, config: dict[str, Any]) -> None:
         now = utc_now()
         mode = config.get("mode", "portfolio")
+        depth_setting = config.get("depth", "auto")
 
         # Mark running
         job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
@@ -146,8 +149,33 @@ class AnalysisRunner:
         # Compute weights using current prices where available
         weight_map, current_prices = _compute_weight_map_with_prices(db, holdings)
 
+        # Build per-ticker depth map based on depth_setting
+        ticker_depth_map: dict[str, str] = {}
+        for ticker in tickers:
+            if depth_setting == "auto":
+                # Original behaviour: tiered by weight, with mode overrides
+                if mode in ("single", "all_individual"):
+                    ticker_depth_map[ticker] = "full"
+                else:
+                    ticker_depth_map[ticker] = depth_overrides.get(
+                        ticker
+                    ) or _determine_depth(weight_map.get(ticker, 0.0))
+            elif depth_setting == "light":
+                ticker_depth_map[ticker] = "quick"
+            elif depth_setting == "medium":
+                ticker_depth_map[ticker] = "standard"
+            elif depth_setting == "deep":
+                ticker_depth_map[ticker] = "full"
+            else:
+                ticker_depth_map[ticker] = _determine_depth(
+                    weight_map.get(ticker, 0.0)
+                )
+
+        # Thread-safe counter for completed tickers
+        completed_lock = threading.Lock()
         completed_count = 0
         position_summaries: list[dict[str, Any]] = []
+        cancelled_detected = False
         event_stream = get_event_stream(job_id)
 
         # Emit initial job status
@@ -158,24 +186,38 @@ class AnalysisRunner:
                 "tickers_total": len(tickers),
             })
 
-        for ticker in tickers:
-            # Check for cancellation between ticker analyses
-            if self._is_cancelled(job_id):
-                job.status = "cancelled"
-                job.completed_at = utc_now()
-                job.error_message = "Cancelled by user"
-                db.commit()
-                logger.info("Job %s cancelled by user", job_id)
-                return
+        # Map depth labels for display: internal -> user-facing
+        _depth_display = {
+            "full": "deep",
+            "heavy": "deep",
+            "standard": "medium",
+            "medium": "medium",
+            "quick": "light",
+            "light": "light",
+        }
+
+        def _analyze_single_ticker(
+            ticker: str,
+            depth: str,
+            position: int,
+        ) -> dict[str, Any]:
+            """Analyze a single ticker in its own thread with its own DB session."""
+            nonlocal completed_count, cancelled_detected
+
+            # Each thread gets its own DB session
+            thread_db = SessionLocal()
+            ticker_start = time.monotonic()
+            display_depth = _depth_display.get(depth, depth)
 
             try:
-                # Determine depth based on mode
-                if mode in ("single", "all_individual"):
-                    depth = "full"
-                else:
-                    depth = depth_overrides.get(ticker) or _determine_depth(
-                        weight_map.get(ticker, 0.0)
-                    )
+                # Emit ticker_start event
+                if event_stream:
+                    event_stream.emit("ticker_start", {
+                        "ticker": ticker,
+                        "depth": display_depth,
+                        "position": position,
+                        "total": len(tickers),
+                    })
 
                 # Create position analysis row
                 pa_id = str(uuid.uuid4())
@@ -188,14 +230,10 @@ class AnalysisRunner:
                     status="running",
                     created_at=utc_now(),
                 )
-                db.add(pa)
-                db.commit()
+                thread_db.add(pa)
+                thread_db.commit()
 
                 # Run analysis via the tiered adapter (blocking).
-                # Use the streaming variant when an event stream exists so
-                # that SSE clients get live progress updates.
-                # Pass a cancellation checker so graph.stream() chunks can
-                # be interrupted mid-ticker (not just between tickers).
                 result = self._adapter.analyze_ticker_streaming(
                     ticker,
                     depth,
@@ -203,29 +241,29 @@ class AnalysisRunner:
                     cancel_check=lambda: self._is_cancelled(job_id),
                 )
 
+                elapsed = round(time.monotonic() - ticker_start, 1)
+
                 # Check for pipeline-level errors
                 if result.get("signal") == "ERROR":
                     pa.status = "failed"
                     pa.error_message = result.get("error", "Unknown pipeline error")
                     pa.completed_at = utc_now()
-                    db.commit()
-                    completed_count += 1
-                    job.completed_tickers = completed_count
-                    db.commit()
+                    thread_db.commit()
+
                     if event_stream:
-                        event_stream.emit("job_status", {
-                            "status": "running",
-                            "tickers_completed": completed_count,
-                            "tickers_total": len(tickers),
+                        event_stream.emit("ticker_complete", {
+                            "ticker": ticker,
+                            "depth": display_depth,
+                            "signal": "ERROR",
+                            "elapsed_seconds": elapsed,
                         })
-                    # Still include in summaries so the synthesis knows it failed
-                    position_summaries.append({
+
+                    return {
                         "ticker": ticker,
                         "signal": "ERROR",
                         "depth": depth,
                         "raw_decision": result.get("raw_decision", ""),
-                    })
-                    continue
+                    }
 
                 # Store results
                 price = current_prices.get(ticker.upper())
@@ -240,30 +278,29 @@ class AnalysisRunner:
                 pa.risk_debate = _to_json(result.get("risk_debate"))
                 pa.investment_plan = _to_json(result.get("investment_plan"))
                 pa.current_price = price
-                pa.price_change_pct = None  # TODO: compute from cached data
+                pa.price_change_pct = None
                 pa.completed_at = utc_now()
-                db.commit()
+                thread_db.commit()
 
                 # Store reports
-                self._store_reports(db, job_id, pa_id, user_id, ticker, result)
+                self._store_reports(thread_db, job_id, pa_id, user_id, ticker, result)
 
-                # Track for portfolio synthesis
-                position_summaries.append({
+                signal = result.get("signal", "HOLD")
+
+                if event_stream:
+                    event_stream.emit("ticker_complete", {
+                        "ticker": ticker,
+                        "depth": display_depth,
+                        "signal": signal,
+                        "elapsed_seconds": elapsed,
+                    })
+
+                return {
                     "ticker": ticker,
-                    "signal": result.get("signal", "HOLD"),
+                    "signal": signal,
                     "depth": depth,
                     "raw_decision": result.get("raw_decision", ""),
-                })
-
-                completed_count += 1
-                job.completed_tickers = completed_count
-                db.commit()
-                if event_stream:
-                    event_stream.emit("job_status", {
-                        "status": "running",
-                        "tickers_completed": completed_count,
-                        "tickers_total": len(tickers),
-                    })
+                }
 
             except AnalysisCancelledError:
                 logger.info(
@@ -271,9 +308,8 @@ class AnalysisRunner:
                     ticker,
                     job_id,
                 )
-                # Mark the in-progress position analysis as cancelled
                 pa_row = (
-                    db.query(PositionAnalysis)
+                    thread_db.query(PositionAnalysis)
                     .filter(
                         PositionAnalysis.job_id == job_id,
                         PositionAnalysis.ticker == ticker,
@@ -284,28 +320,16 @@ class AnalysisRunner:
                     pa_row.status = "failed"
                     pa_row.error_message = "Cancelled by user"
                     pa_row.completed_at = utc_now()
-                db.commit()
-
-                # Mark the job as cancelled and exit the ticker loop
-                job.status = "cancelled"
-                job.completed_at = utc_now()
-                job.error_message = "Cancelled by user"
-                db.commit()
-                if event_stream:
-                    event_stream.emit("job_status", {
-                        "status": "cancelled",
-                        "tickers_completed": completed_count,
-                        "tickers_total": len(tickers),
-                    })
-                logger.info("Job %s cancelled by user (mid-ticker)", job_id)
-                return
+                thread_db.commit()
+                cancelled_detected = True
+                raise
 
             except Exception:
                 logger.exception(
                     "Analysis failed for ticker %s in job %s", ticker, job_id
                 )
                 pa_row = (
-                    db.query(PositionAnalysis)
+                    thread_db.query(PositionAnalysis)
                     .filter(
                         PositionAnalysis.job_id == job_id,
                         PositionAnalysis.ticker == ticker,
@@ -316,22 +340,107 @@ class AnalysisRunner:
                     pa_row.status = "failed"
                     pa_row.error_message = f"Analysis failed for {ticker}"
                     pa_row.completed_at = utc_now()
-                db.commit()
-                position_summaries.append({
+                thread_db.commit()
+
+                elapsed = round(time.monotonic() - ticker_start, 1)
+                if event_stream:
+                    event_stream.emit("ticker_complete", {
+                        "ticker": ticker,
+                        "depth": display_depth,
+                        "signal": "ERROR",
+                        "elapsed_seconds": elapsed,
+                    })
+
+                return {
                     "ticker": ticker,
                     "signal": "ERROR",
-                    "depth": depth_overrides.get(ticker, "unknown"),
+                    "depth": depth,
                     "raw_decision": f"Analysis failed for {ticker}",
-                })
-                completed_count += 1
-                job.completed_tickers = completed_count
-                db.commit()
+                }
+
+            finally:
+                # Always increment the counter and update job progress
+                with completed_lock:
+                    completed_count += 1
+                    current_count = completed_count
+
+                # Update job progress in a fresh query (main db session for job updates)
+                try:
+                    thread_db.execute(
+                        AnalysisJob.__table__.update()
+                        .where(AnalysisJob.id == job_id)
+                        .values(completed_tickers=current_count)
+                    )
+                    thread_db.commit()
+                except Exception:
+                    logger.warning("Failed to update completed_tickers for job %s", job_id)
+
                 if event_stream:
                     event_stream.emit("job_status", {
                         "status": "running",
-                        "tickers_completed": completed_count,
+                        "tickers_completed": current_count,
                         "tickers_total": len(tickers),
                     })
+
+                thread_db.close()
+
+        # ----- Run ticker analyses in parallel -----
+        concurrency = min(settings.analysis_concurrency, len(tickers))
+        logger.info(
+            "Job %s: analyzing %d tickers with concurrency=%d depth_setting=%s",
+            job_id,
+            len(tickers),
+            concurrency,
+            depth_setting,
+        )
+
+        with ThreadPoolExecutor(max_workers=concurrency) as ticker_pool:
+            futures = {}
+            for idx, ticker in enumerate(tickers, 1):
+                depth = ticker_depth_map[ticker]
+                future = ticker_pool.submit(
+                    _analyze_single_ticker, ticker, depth, idx
+                )
+                futures[future] = ticker
+
+            for future in as_completed(futures):
+                ticker = futures[future]
+                try:
+                    summary = future.result()
+                    position_summaries.append(summary)
+                except AnalysisCancelledError:
+                    # Cancellation: don't collect more results, let pool drain
+                    cancelled_detected = True
+                except Exception:
+                    logger.exception(
+                        "Unexpected error collecting result for %s in job %s",
+                        ticker,
+                        job_id,
+                    )
+
+        # If cancellation was detected, mark job cancelled and exit
+        if cancelled_detected or self._is_cancelled(job_id):
+            job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+            if job and job.status not in ("cancelled", "failed"):
+                job.status = "cancelled"
+                job.completed_at = utc_now()
+                job.error_message = "Cancelled by user"
+                db.commit()
+            if event_stream:
+                event_stream.emit("job_status", {
+                    "status": "cancelled",
+                    "tickers_completed": completed_count,
+                    "tickers_total": len(tickers),
+                })
+            logger.info("Job %s cancelled by user", job_id)
+            return
+
+        # Refresh the job object after parallel work
+        db.expire_all()
+        job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+        if not job:
+            logger.error("Job %s disappeared after parallel phase", job_id)
+            return
 
         # ---------------------------------------------------------------
         # Portfolio-level synthesis + recommendations

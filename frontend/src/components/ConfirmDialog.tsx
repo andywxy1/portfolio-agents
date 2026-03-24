@@ -1,9 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 
 interface ConfirmDialogProps {
   open: boolean;
   title: string;
-  message: string;
+  message?: string;
+  children?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   destructive?: boolean;
@@ -15,6 +16,7 @@ export function ConfirmDialog({
   open,
   title,
   message,
+  children,
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   destructive = false,
@@ -47,7 +49,8 @@ export function ConfirmDialog({
       {/* Panel */}
       <div className="relative z-10 mx-4 w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
         <h3 id="confirm-dialog-title" className="text-lg font-semibold text-gray-900">{title}</h3>
-        <p className="mt-2 text-sm text-gray-600">{message}</p>
+        {message && <p className="mt-2 text-sm text-gray-600">{message}</p>}
+        {children && <div className="mt-3">{children}</div>}
         <div className="mt-6 flex justify-end gap-3">
           <button
             onClick={onCancel}

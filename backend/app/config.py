@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     max_debate_rounds: int = 1
     max_risk_discuss_rounds: int = 1
 
+    # Parallel analysis
+    analysis_concurrency: int = 5
+
     # CORS
     cors_origins: list[str] = [
         "http://localhost:5173",

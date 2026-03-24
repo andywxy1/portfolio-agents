@@ -83,6 +83,7 @@ def start_analysis(
         )
 
     mode = body.mode or "portfolio"
+    depth = body.depth or "auto"
 
     # Determine tickers based on mode
     if mode == "single":
@@ -140,6 +141,7 @@ def start_analysis(
         user_id=user_id,
         status="pending",
         mode=mode,
+        depth=depth,
         tickers=json.dumps(tickers),
         total_tickers=len(tickers),
         completed_tickers=0,
@@ -152,6 +154,7 @@ def start_analysis(
     # Submit to background runner
     runner_config = config_dict or {}
     runner_config["mode"] = mode
+    runner_config["depth"] = depth
     get_runner().submit_job(job.id, runner_config)
 
     return StartAnalysisResponse(
@@ -160,6 +163,7 @@ def start_analysis(
         tickers=tickers,
         total_tickers=len(tickers),
         mode=mode,
+        depth=depth,
     )
 
 
@@ -202,6 +206,7 @@ def list_jobs(
                 id=job.id,
                 status=job.status,
                 mode=job.mode,
+                depth=job.depth or "auto",
                 created_at=job.created_at,
                 completed_at=job.completed_at,
                 tickers_total=job.total_tickers,
@@ -454,6 +459,8 @@ def _job_to_response(db: Session, job: AnalysisJob) -> AnalysisJobResponse:
         id=job.id,
         user_id=job.user_id,
         status=job.status,
+        mode=job.mode,
+        depth=job.depth or "auto",
         tickers=tickers,
         total_tickers=job.total_tickers,
         completed_tickers=job.completed_tickers,

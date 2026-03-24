@@ -10,6 +10,7 @@ class AnalysisJob(Base):
     user_id = Column(String, nullable=False, default="default")
     status = Column(String, nullable=False, default="pending")
     mode = Column(String, nullable=True, default="portfolio")
+    depth = Column(String, nullable=True, default="auto")  # auto|light|medium|deep
     tickers = Column(Text, nullable=False)  # JSON array
     total_tickers = Column(Integer, nullable=False, default=0)
     completed_tickers = Column(Integer, nullable=False, default=0)

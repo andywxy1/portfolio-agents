@@ -94,11 +94,14 @@ export interface AnalysisJob {
 
 export type AnalysisMode = "portfolio" | "all_individual" | "single";
 
+export type AnalysisRequestDepth = "auto" | "light" | "medium" | "deep";
+
 export interface StartAnalysisRequest {
   mode?: AnalysisMode;
   ticker?: string;
   tickers?: string[];
   config?: AnalysisJobConfig;
+  depth?: AnalysisRequestDepth;
 }
 
 export interface StartAnalysisResponse {

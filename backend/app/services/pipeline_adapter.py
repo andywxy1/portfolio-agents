@@ -581,10 +581,21 @@ class PipelineAdapter:
                                     "status": "completed",
                                 })
 
+                            # Resolve depth label for display from the
+                            # analyst set: heavy->deep, medium->medium,
+                            # light->light
+                            if analysts == _ANALYSTS_HEAVY:
+                                _depth_label = "deep"
+                            elif analysts == _ANALYSTS_MEDIUM:
+                                _depth_label = "medium"
+                            else:
+                                _depth_label = "light"
+
                             event_stream.emit("stage_start", {
                                 "team": team,
                                 "agent": agent,
                                 "ticker": ticker,
+                                "depth": _depth_label,
                             })
                             last_node = node_name
 

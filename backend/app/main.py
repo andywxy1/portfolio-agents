@@ -75,6 +75,27 @@ def _add_mode_column_if_missing() -> None:
         db.close()
 
 
+def _add_depth_column_if_missing() -> None:
+    """Add the `depth` column to analysis_jobs if it doesn't exist yet.
+
+    This handles upgrades from older schema versions.
+    """
+    db = SessionLocal()
+    try:
+        result = db.execute(text("PRAGMA table_info(analysis_jobs)")).fetchall()
+        column_names = [row[1] for row in result]
+        if "depth" not in column_names:
+            db.execute(
+                text("ALTER TABLE analysis_jobs ADD COLUMN depth TEXT DEFAULT 'auto'")
+            )
+            db.commit()
+            logger.info("Added 'depth' column to analysis_jobs table")
+    except Exception:
+        logger.exception("Failed to add depth column")
+    finally:
+        db.close()
+
+
 def _recover_stuck_jobs() -> None:
     """Mark any pending/running jobs as failed.
 
@@ -108,6 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Initializing database...")
     init_db()
     _add_mode_column_if_missing()
+    _add_depth_column_if_missing()
     logger.info("Database initialized. Recovering stuck jobs...")
     _recover_stuck_jobs()
     logger.info("Cleaning up stale cache...")

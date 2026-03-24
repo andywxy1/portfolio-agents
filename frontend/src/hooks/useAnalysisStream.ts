@@ -64,6 +64,18 @@ export interface JobProgress {
   tickersTotal: number;
 }
 
+export interface TickerDepthInfo {
+  depth: string;
+  position: number;
+  total: number;
+}
+
+export interface TickerCompleteInfo {
+  depth: string;
+  signal: string;
+  elapsedSeconds: number;
+}
+
 // ---------------------------------------------------------------------------
 // Agent pipeline definition (the canonical order)
 // ---------------------------------------------------------------------------
@@ -111,6 +123,10 @@ export function useAnalysisStream(jobId: string | undefined) {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [jobProgress, setJobProgress] = useState<JobProgress>({ tickersCompleted: 0, tickersTotal: 0 });
   const [tickers, setTickers] = useState<string[]>([]);
+  const [tickerDepths, setTickerDepths] = useState<Map<string, TickerDepthInfo>>(new Map());
+  const [tickerCompleted, setTickerCompleted] = useState<Map<string, TickerCompleteInfo>>(new Map());
+  const [activeTickers, setActiveTickers] = useState<Set<string>>(new Set());
+  const [overallDepth, setOverallDepth] = useState<string>('auto');
 
   const esRef = useRef<EventSource | null>(null);
   const retriesRef = useRef(0);
@@ -162,6 +178,53 @@ export function useAnalysisStream(jobId: string | undefined) {
         setConnectionError(null);
         retriesRef.current = 0;
       };
+
+      onSSE(es, 'ticker_start', (raw) => {
+        const d = JSON.parse(raw);
+        const ticker = d.ticker ?? '_all';
+        setTickerDepths(prev => {
+          const next = new Map(prev);
+          next.set(ticker, { depth: d.depth ?? 'auto', position: d.position ?? 0, total: d.total ?? 0 });
+          return next;
+        });
+        setActiveTickers(prev => {
+          const next = new Set(prev);
+          next.add(ticker);
+          return next;
+        });
+        if (d.depth) {
+          setOverallDepth(d.depth);
+        }
+        addEvent(ticker, {
+          id: `evt-${++eventCounter}`,
+          type: 'stage_start',
+          timestamp: Date.now(),
+          ticker,
+          content: `Ticker ${ticker} starting (${d.depth ?? 'auto'} depth)`,
+        });
+      });
+
+      onSSE(es, 'ticker_complete', (raw) => {
+        const d = JSON.parse(raw);
+        const ticker = d.ticker ?? '_all';
+        setTickerCompleted(prev => {
+          const next = new Map(prev);
+          next.set(ticker, { depth: d.depth ?? 'auto', signal: d.signal ?? '', elapsedSeconds: d.elapsed_seconds ?? 0 });
+          return next;
+        });
+        setActiveTickers(prev => {
+          const next = new Set(prev);
+          next.delete(ticker);
+          return next;
+        });
+        addEvent(ticker, {
+          id: `evt-${++eventCounter}`,
+          type: 'stage_complete',
+          timestamp: Date.now(),
+          ticker,
+          content: `Ticker ${ticker} complete: ${d.signal ?? 'N/A'} (${d.elapsed_seconds ?? 0}s)`,
+        });
+      });
 
       onSSE(es, 'stage_start', (raw) => {
         const d = JSON.parse(raw);
@@ -342,11 +405,17 @@ export function useAnalysisStream(jobId: string | undefined) {
     eventsByTicker,
     stagesByTicker,
     reportsByTicker,
+    setReportsByTicker,
     decisions,
+    setDecisions,
     isConnected,
     isComplete,
     connectionError,
     jobProgress,
     tickers,
+    tickerDepths,
+    tickerCompleted,
+    activeTickers,
+    overallDepth,
   };
 }

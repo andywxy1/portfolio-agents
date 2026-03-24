@@ -3,7 +3,9 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { usePageTitle } from '../../hooks/usePageTitle';
 import { clearActiveAnalysisJob } from '../../hooks/useActiveAnalysis';
 import { useToast } from '../../components/Toast';
+import { apiClient } from '../../api/client';
 import { useAnalysisJob, useCancelAnalysis } from '../../api/hooks';
+import type { LatestAnalysisResponse } from '../../types';
 import {
   useAnalysisStream,
   AGENT_PIPELINE,
@@ -12,57 +14,199 @@ import type {
   AgentStatus,
   StreamEvent,
   DecisionInfo,
+  TickerDepthInfo,
 } from '../../hooks/useAnalysisStream';
+import { depthBadgeClass } from '../../components/DepthSelector';
 
 // =============================================================================
 // Utilities
 // =============================================================================
 
-/** Simple markdown renderer - handles ##, **, -, ```, `inline` */
+/** Comprehensive markdown renderer for dark-themed report display */
 function renderMarkdown(text: string): string {
   if (!text) return '';
+
   let html = text
-    // Escape HTML first
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
-  // Code blocks (``` ... ```)
-  html = html.replace(/```[\s\S]*?```/g, (match) => {
-    const code = match.slice(3, -3).replace(/^\w*\n/, '');
-    return `<pre class="bg-gray-800 rounded p-3 my-2 overflow-x-auto text-sm text-gray-300 font-mono">${code}</pre>`;
+  // Code blocks - extract before other transforms
+  const codeBlocks: string[] = [];
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, _lang, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push(`<pre class="bg-gray-800 rounded p-3 my-3 overflow-x-auto text-sm text-gray-300 font-mono border border-gray-700">${code.replace(/\n$/, '')}</pre>`);
+    return `\x00CB${idx}\x00`;
+  });
+  html = html.replace(/```([\s\S]*?)```/g, (_match, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push(`<pre class="bg-gray-800 rounded p-3 my-3 overflow-x-auto text-sm text-gray-300 font-mono border border-gray-700">${code.replace(/^\n/, '').replace(/\n$/, '')}</pre>`);
+    return `\x00CB${idx}\x00`;
   });
 
-  // Inline code
-  html = html.replace(/`([^`]+)`/g, '<code class="bg-gray-800 px-1.5 py-0.5 rounded text-sm text-emerald-400 font-mono">$1</code>');
+  // Tables
+  html = html.replace(
+    /((?:^|\n)\|[^\n]+\|\n\|[\s:|-]+\|\n(?:\|[^\n]+\|\n?)*)/g,
+    (tableBlock) => {
+      const lines = tableBlock.trim().split('\n').filter(l => l.trim());
+      if (lines.length < 2) return tableBlock;
+      const parseRow = (line: string): string[] =>
+        line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+      const headers = parseRow(lines[0]);
+      const dataRows = lines.slice(2).map(parseRow);
+      let table = '<div class="overflow-x-auto my-3"><table class="w-full text-sm border-collapse border border-gray-700 rounded">';
+      table += '<thead><tr class="bg-gray-800">';
+      for (const h of headers) {
+        table += `<th class="px-3 py-2 text-left text-gray-200 font-semibold border border-gray-700">${h}</th>`;
+      }
+      table += '</tr></thead><tbody>';
+      dataRows.forEach((row, rowIdx) => {
+        const bgClass = rowIdx % 2 === 0 ? 'bg-gray-900' : 'bg-gray-900/50';
+        table += `<tr class="${bgClass} hover:bg-gray-800/70 transition-colors">`;
+        for (let i = 0; i < headers.length; i++) {
+          table += `<td class="px-3 py-2 text-gray-300 border border-gray-700">${row[i] ?? ''}</td>`;
+        }
+        table += '</tr>';
+      });
+      table += '</tbody></table></div>';
+      return table;
+    }
+  );
+
+  // Blockquotes
+  html = html.replace(
+    /((?:^|\n)&gt; [^\n]+(?:\n&gt; [^\n]+)*)/g,
+    (block) => {
+      const inner = block.replace(/(?:^|\n)&gt; /g, '\n').trim();
+      return `<blockquote class="border-l-4 border-gray-600 pl-4 my-3 text-gray-400 italic">${inner}</blockquote>`;
+    }
+  );
 
   // Headers
+  html = html.replace(/^#### (.+)$/gm, '<h4 class="text-base font-semibold text-gray-100 mt-3 mb-1.5">$1</h4>');
   html = html.replace(/^### (.+)$/gm, '<h3 class="text-lg font-semibold text-gray-100 mt-4 mb-2">$1</h3>');
   html = html.replace(/^## (.+)$/gm, '<h2 class="text-xl font-bold text-gray-100 mt-5 mb-2">$1</h2>');
   html = html.replace(/^# (.+)$/gm, '<h1 class="text-2xl font-bold text-gray-100 mt-6 mb-3">$1</h1>');
 
+  // Horizontal rules
+  html = html.replace(/^(\*{3,}|-{3,}|_{3,})$/gm, '<hr class="border-gray-700 my-4" />');
+
+  // Bold+Italic combined
+  html = html.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong class="text-gray-100 font-semibold"><em>$1</em></strong>');
   // Bold
   html = html.replace(/\*\*([^*]+)\*\*/g, '<strong class="text-gray-100 font-semibold">$1</strong>');
-
   // Italic
-  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  html = html.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em class="text-gray-300">$1</em>');
+
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code class="bg-gray-800 px-1.5 py-0.5 rounded text-sm text-emerald-400 font-mono">$1</code>');
+
+  // Numbered lists
+  html = html.replace(
+    /((?:^\d+\. .+$\n?)+)/gm,
+    (block) => {
+      const items = block.trim().split('\n').map(line => {
+        const m = line.match(/^\d+\.\s+(.+)$/);
+        return m ? `<li class="ml-4 list-decimal text-gray-300">${m[1]}</li>` : '';
+      }).join('\n');
+      return `<ol class="my-2 space-y-1 pl-2">${items}</ol>`;
+    }
+  );
 
   // Unordered lists
-  html = html.replace(/^- (.+)$/gm, '<li class="ml-4 list-disc text-gray-300">$1</li>');
-  // Wrap consecutive <li> in <ul>
-  html = html.replace(/((?:<li[^>]*>.*<\/li>\n?)+)/g, '<ul class="my-2 space-y-1">$1</ul>');
+  html = html.replace(
+    /((?:^[ \t]*[-*] .+$\n?)+)/gm,
+    (block) => {
+      const items = block.trim().split('\n').map(line => {
+        const m = line.match(/^([ \t]*)[-*]\s+(.+)$/);
+        if (!m) return '';
+        const indent = m[1].length;
+        const mlClass = indent >= 4 ? 'ml-8' : indent >= 2 ? 'ml-6' : 'ml-4';
+        return `<li class="${mlClass} list-disc text-gray-300">${m[2]}</li>`;
+      }).join('\n');
+      return `<ul class="my-2 space-y-1">${items}</ul>`;
+    }
+  );
 
-  // Ordered lists
-  html = html.replace(/^\d+\. (.+)$/gm, '<li class="ml-4 list-decimal text-gray-300">$1</li>');
+  // Paragraphs
+  const sections = html.split(/\n\n+/);
+  html = sections
+    .map(section => {
+      const trimmed = section.trim();
+      if (!trimmed) return '';
+      if (/^(<h[1-4]|<ul|<ol|<pre|<table|<div|<blockquote|<hr|\x00CB)/.test(trimmed)) {
+        return trimmed;
+      }
+      return `<p class="text-gray-300 my-2">${trimmed.replace(/\n/g, '<br />')}</p>`;
+    })
+    .join('\n');
 
-  // Paragraphs (double newlines)
-  html = html.replace(/\n\n/g, '</p><p class="text-gray-300 my-2">');
-  html = `<p class="text-gray-300 my-2">${html}</p>`;
+  // Restore code blocks
+  html = html.replace(/\x00CB(\d+)\x00/g, (_m, idx) => codeBlocks[parseInt(idx, 10)] ?? '');
 
   // Clean up empty paragraphs
   html = html.replace(/<p[^>]*>\s*<\/p>/g, '');
 
   return html;
+}
+
+/** Extract text from a report field that may be JSON or a plain string */
+function extractReportText(value: unknown): string {
+  if (!value) return '';
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (typeof parsed === 'object' && parsed !== null) {
+        return extractReportText(parsed);
+      }
+      return String(parsed);
+    } catch {
+      return value;
+    }
+  }
+  if (typeof value === 'object' && value !== null) {
+    const obj = value as Record<string, unknown>;
+    // Common wrapper: { text: "..." }
+    if (typeof obj.text === 'string') return obj.text;
+    // Investment debate structure
+    if (obj.bull_case || obj.bear_case || obj.judge_decision) {
+      const parts: string[] = [];
+      if (obj.bull_case) parts.push(`## Bull Case\n\n${obj.bull_case}`);
+      if (obj.bear_case) parts.push(`## Bear Case\n\n${obj.bear_case}`);
+      if (obj.debate_history) parts.push(`## Debate History\n\n${obj.debate_history}`);
+      if (obj.judge_decision) parts.push(`## Judge Decision\n\n${obj.judge_decision}`);
+      return parts.join('\n\n---\n\n');
+    }
+    // Risk debate structure
+    if (obj.aggressive_view || obj.conservative_view || obj.neutral_view) {
+      const parts: string[] = [];
+      if (obj.aggressive_view) parts.push(`## Aggressive View\n\n${obj.aggressive_view}`);
+      if (obj.conservative_view) parts.push(`## Conservative View\n\n${obj.conservative_view}`);
+      if (obj.neutral_view) parts.push(`## Neutral View\n\n${obj.neutral_view}`);
+      if (obj.debate_history) parts.push(`## Debate History\n\n${obj.debate_history}`);
+      if (obj.judge_decision) parts.push(`## Judge Decision\n\n${obj.judge_decision}`);
+      return parts.join('\n\n---\n\n');
+    }
+    // Alternate pipeline naming
+    if (obj.bull_report || obj.bear_report) {
+      const parts: string[] = [];
+      if (obj.bull_report) parts.push(`## Bull Report\n\n${obj.bull_report}`);
+      if (obj.bear_report) parts.push(`## Bear Report\n\n${obj.bear_report}`);
+      if (obj.judge_decision) parts.push(`## Judge Decision\n\n${obj.judge_decision}`);
+      return parts.join('\n\n---\n\n');
+    }
+    if (obj.aggressive_report || obj.conservative_report || obj.neutral_report) {
+      const parts: string[] = [];
+      if (obj.aggressive_report) parts.push(`## Aggressive Report\n\n${obj.aggressive_report}`);
+      if (obj.conservative_report) parts.push(`## Conservative Report\n\n${obj.conservative_report}`);
+      if (obj.neutral_report) parts.push(`## Neutral Report\n\n${obj.neutral_report}`);
+      if (obj.judge_decision) parts.push(`## Judge Decision\n\n${obj.judge_decision}`);
+      return parts.join('\n\n---\n\n');
+    }
+    // Fallback: stringify
+    return JSON.stringify(value, null, 2);
+  }
+  return String(value);
 }
 
 /** Format timestamp for message log */
@@ -95,21 +239,6 @@ function sentimentBorderClass(type: StreamEvent['type'], content: string): strin
   if (s === 'bullish') return 'border-l-emerald-500';
   if (s === 'bearish') return 'border-l-red-500';
   return 'border-l-amber-500';
-}
-
-/** Type badge config */
-function typeBadge(type: StreamEvent['type']): { label: string; cls: string } {
-  switch (type) {
-    case 'agent_message': return { label: 'Agent', cls: 'bg-purple-900/60 text-purple-300' };
-    case 'tool_call': return { label: 'Tool', cls: 'bg-blue-900/60 text-blue-300' };
-    case 'tool_result': return { label: 'Data', cls: 'bg-gray-700/60 text-gray-300' };
-    case 'stage_start': return { label: 'System', cls: 'bg-emerald-900/60 text-emerald-300' };
-    case 'stage_complete': return { label: 'System', cls: 'bg-emerald-900/60 text-emerald-300' };
-    case 'report': return { label: 'Report', cls: 'bg-cyan-900/60 text-cyan-300' };
-    case 'decision': return { label: 'Decision', cls: 'bg-amber-900/60 text-amber-300' };
-    case 'error': return { label: 'Error', cls: 'bg-red-900/60 text-red-300' };
-    default: return { label: 'Info', cls: 'bg-gray-700/60 text-gray-400' };
-  }
 }
 
 /** Agent avatar color from agent name */
@@ -151,21 +280,34 @@ async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
-// Report type labels
+// Report type labels - canonical mapping for all report keys
 const REPORT_TYPE_LABELS: Record<string, string> = {
   market: 'Market',
   sentiment: 'Sentiment',
   news: 'News',
   fundamentals: 'Fundamentals',
   debate: 'Debate',
-  risk: 'Risk',
-  decision: 'Decision',
   investment_debate: 'Debate',
+  risk: 'Risk',
   risk_debate: 'Risk',
+  plan: 'Plan',
   investment_plan: 'Plan',
+  decision: 'Decision',
 };
 
-const REPORT_TAB_ORDER = ['market', 'sentiment', 'news', 'fundamentals', 'debate', 'investment_debate', 'risk', 'risk_debate', 'investment_plan', 'decision'];
+// Canonical tab order. SSE uses short keys (market, sentiment, etc.).
+// DB reports use longer keys (investment_debate, risk_debate, investment_plan).
+// We show both aliases but dedupe by label.
+const REPORT_TAB_ORDER = ['market', 'sentiment', 'news', 'fundamentals', 'debate', 'investment_debate', 'risk', 'risk_debate', 'plan', 'investment_plan', 'decision'];
+
+// DB field names to tab key mapping (used in completion fetch)
+const DB_SIMPLE_REPORT_FIELDS: Array<[string, string]> = [
+  ['market_report', 'market'],
+  ['sentiment_report', 'sentiment'],
+  ['news_report', 'news'],
+  ['fundamentals_report', 'fundamentals'],
+  ['investment_plan', 'plan'],
+];
 
 // =============================================================================
 // Sub-components
@@ -225,9 +367,13 @@ function Sparkline({ data, width = 150, height = 50 }: { data: number[]; width?:
 function ProgressPanel({
   stages,
   currentTicker,
+  tickerDepth,
+  concurrentTickers,
 }: {
   stages: Map<string, AgentStatus>;
   currentTicker: string;
+  tickerDepth?: TickerDepthInfo;
+  concurrentTickers?: Set<string>;
 }) {
   // Group pipeline by team
   const teams = useMemo(() => {
@@ -243,8 +389,33 @@ function ProgressPanel({
     return grouped;
   }, []);
 
+  const concurrentList = concurrentTickers ? [...concurrentTickers] : [];
+
   return (
     <div className="space-y-4" role="tree" aria-label={`Analysis progress for ${currentTicker}`}>
+      {/* Ticker depth subtitle */}
+      {tickerDepth && (
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-sm font-semibold text-gray-300">{currentTicker}</span>
+          {(() => {
+            const badge = depthBadgeClass(tickerDepth.depth);
+            return (
+              <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${badge.bg} ${badge.text}`}>
+                <span className={`inline-block h-1.5 w-1.5 rounded-full ${badge.dot}`} />
+                {tickerDepth.depth}
+              </span>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Parallel status */}
+      {concurrentList.length > 1 && (
+        <div className="rounded bg-blue-950/40 border border-blue-900/50 px-2.5 py-1.5 text-xs text-blue-300 mb-1">
+          Analyzing: {concurrentList.join(', ')} ({concurrentList.length} concurrent)
+        </div>
+      )}
+
       {teams.map(({ team, agents }) => (
         <div key={team}>
           <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1.5" role="treeitem">
@@ -285,24 +456,94 @@ function ProgressPanel({
   );
 }
 
+/** Format tool call as compact summary */
+function formatToolCallSummary(content: string): string {
+  const fnMatch = content.match(/(\w+)\s*\(/);
+  if (fnMatch) {
+    const argsMatch = content.match(/\(([^)]*)\)/);
+    const args = argsMatch ? argsMatch[1].replace(/['"{}]/g, '').split(',').slice(0, 2).join(', ') : '';
+    return args ? `${fnMatch[1]}(${args})` : fnMatch[1] + '()';
+  }
+  return content.slice(0, 60) + (content.length > 60 ? '...' : '');
+}
+
 /** Single message row in the feed */
-function MessageRow({ event, expanded, onToggle }: { event: StreamEvent; expanded: boolean; onToggle: () => void }) {
-  const badge = typeBadge(event.type);
+function MessageRow({ event, expanded, onToggle, showTickerBadge }: { event: StreamEvent; expanded: boolean; onToggle: () => void; showTickerBadge?: boolean }) {
   const content = event.content ?? '';
-  const isLong = content.length > 200;
-  const displayContent = (!expanded && isLong) ? content.slice(0, 200) + '...' : content;
+  const isToolCall = event.type === 'tool_call' || event.type === 'tool_result';
+  const isSystemOrData = event.type === 'stage_start' || event.type === 'stage_complete' || event.type === 'report' || event.type === 'decision';
+
+  // Tool calls: compact collapsed line, expandable on click
+  if (isToolCall) {
+    const summary = formatToolCallSummary(content);
+    return (
+      <div
+        className="pl-3 py-0.5 cursor-pointer hover:bg-gray-800/30 transition-colors"
+        onClick={onToggle}
+        role="row"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}
+      >
+        {!expanded ? (
+          <div className="flex items-center gap-1.5 text-xs text-gray-500">
+            <span className="text-gray-600 font-mono tabular-nums">{formatTime(event.timestamp)}</span>
+            {showTickerBadge && event.ticker && event.ticker !== '_all' && (
+              <span className="text-[10px] text-gray-600 uppercase">{event.ticker}</span>
+            )}
+            <span>{event.type === 'tool_call' ? '\uD83D\uDD27' : '\uD83D\uDCE6'} {summary}</span>
+          </div>
+        ) : (
+          <div className="border-l-2 border-l-blue-500/40 pl-2 py-1">
+            <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-1">
+              <span className="font-mono tabular-nums">{formatTime(event.timestamp)}</span>
+              <span className="text-blue-400">{event.type === 'tool_call' ? 'Tool Call' : 'Tool Result'}</span>
+              {event.agent && <span className="text-gray-600">({event.agent})</span>}
+            </div>
+            <div className="text-xs text-gray-400 whitespace-pre-wrap break-words font-mono bg-gray-900/50 rounded p-2 max-h-40 overflow-y-auto">
+              {content}
+            </div>
+            <button
+              className="text-[10px] text-blue-400 hover:text-blue-300 mt-0.5"
+              onClick={(e) => { e.stopPropagation(); onToggle(); }}
+            >
+              Collapse
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // System/control and data messages: small gray text, no expansion
+  if (isSystemOrData) {
+    return (
+      <div className="pl-3 py-0.5" role="row">
+        <div className="flex items-center gap-1.5 text-xs text-gray-600">
+          <span className="font-mono tabular-nums">{formatTime(event.timestamp)}</span>
+          {showTickerBadge && event.ticker && event.ticker !== '_all' && (
+            <span className="text-[10px] text-gray-600 uppercase">{event.ticker}</span>
+          )}
+          <span className="text-gray-700">{'\u2500'}</span>
+          <span className="truncate">{content.slice(0, 80)}{content.length > 80 ? '...' : ''}</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Agent messages: full display with avatar and content
   const borderClass = sentimentBorderClass(event.type, content);
+  const isLong = content.length > 300;
+  const displayContent = (!expanded && isLong) ? content.slice(0, 300) + '...' : content;
 
   return (
     <div
-      className={`border-l-2 ${borderClass} pl-3 py-2 hover:bg-gray-800/50 transition-colors cursor-pointer`}
-      onClick={onToggle}
+      className={`border-l-2 ${borderClass} pl-3 py-2 hover:bg-gray-800/50 transition-colors ${isLong ? 'cursor-pointer' : ''}`}
+      onClick={isLong ? onToggle : undefined}
       role="row"
-      tabIndex={0}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}
+      tabIndex={isLong ? 0 : undefined}
+      onKeyDown={isLong ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } } : undefined}
     >
       <div className="flex items-start gap-2">
-        {/* Agent avatar */}
         {event.agent && (
           <div
             className={`flex-shrink-0 w-6 h-6 rounded-full ${agentColor(event.agent)} flex items-center justify-center text-xs font-bold text-white mt-0.5`}
@@ -315,17 +556,17 @@ function MessageRow({ event, expanded, onToggle }: { event: StreamEvent; expande
         {!event.agent && <div className="flex-shrink-0 w-6" />}
 
         <div className="flex-1 min-w-0">
-          {/* Meta line */}
           <div className="flex items-center gap-2 mb-0.5">
             <span className="text-xs text-gray-500 font-mono tabular-nums">{formatTime(event.timestamp)}</span>
-            <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${badge.cls}`}>
-              {badge.label}
-            </span>
+            {showTickerBadge && event.ticker && event.ticker !== '_all' && (
+              <span className="inline-flex items-center rounded bg-gray-700/80 px-1.5 py-0.5 text-[10px] font-semibold text-gray-300 uppercase">
+                {event.ticker}
+              </span>
+            )}
             {event.agent && (
-              <span className="text-xs text-gray-400 truncate">{event.agent}</span>
+              <span className="text-xs text-purple-400 font-medium truncate">{event.agent}</span>
             )}
           </div>
-          {/* Content */}
           <div className="text-sm text-gray-300 whitespace-pre-wrap break-words">
             {displayContent}
           </div>
@@ -343,8 +584,8 @@ function MessageRow({ event, expanded, onToggle }: { event: StreamEvent; expande
   );
 }
 
-/** Messages panel (right side) */
-function MessagesPanel({ events }: { events: StreamEvent[] }) {
+/** Messages panel */
+function MessagesPanel({ events, showTickerBadge, showToolCalls }: { events: StreamEvent[]; showTickerBadge?: boolean; showToolCalls: boolean }) {
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [userScrolled, setUserScrolled] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -377,10 +618,14 @@ function MessagesPanel({ events }: { events: StreamEvent[] }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
 
-  // Filter out stage_start/stage_complete for cleaner feed, keep the rest
+  // Filter events: always hide job_status, hide tool calls when toggle is off
   const visibleEvents = useMemo(() =>
-    events.filter(e => e.type !== 'stage_start' && e.type !== 'stage_complete' && e.type !== 'job_status'),
-    [events]
+    events.filter(e => {
+      if (e.type === 'job_status') return false;
+      if (!showToolCalls && (e.type === 'tool_call' || e.type === 'tool_result')) return false;
+      return true;
+    }),
+    [events, showToolCalls]
   );
 
   return (
@@ -404,6 +649,7 @@ function MessagesPanel({ events }: { events: StreamEvent[] }) {
             event={event}
             expanded={expandedIds.has(event.id)}
             onToggle={() => toggleExpand(event.id)}
+            showTickerBadge={showTickerBadge}
           />
         ))}
         <div ref={bottomRef} />
@@ -569,13 +815,21 @@ export default function AnalysisLive() {
     eventsByTicker,
     stagesByTicker,
     reportsByTicker,
+    setReportsByTicker,
     decisions,
+    setDecisions,
     isConnected,
     isComplete,
     connectionError,
     jobProgress,
     tickers: streamTickers,
+    tickerDepths,
+    activeTickers: concurrentTickers,
+    overallDepth,
   } = useAnalysisStream(jobId);
+
+  // Messages ticker filter
+  const [messageTickerFilter, setMessageTickerFilter] = useState<string>('_all');
 
   // Fallback polling for job status
   const { data: job, isLoading: jobLoading, isError: jobError } = useAnalysisJob(jobId);
@@ -611,8 +865,71 @@ export default function AnalysisLive() {
     prevComplete.current = isComplete;
   }, [isComplete, soundEnabled]);
 
+  // When analysis completes, fetch full reports from DB to replace truncated SSE data
+  const fetchedFullReports = useRef(false);
+  useEffect(() => {
+    if (!isComplete || !jobId || fetchedFullReports.current) return;
+    fetchedFullReports.current = true;
+
+    apiClient.get<LatestAnalysisResponse>('/analysis/latest').then((data) => {
+      if (!data?.position_analyses?.length) return;
+
+      const fullReports = new Map<string, Map<string, string>>();
+      const newDecisions = new Map(decisions);
+
+      for (const pa of data.position_analyses) {
+        const tickerReports = new Map<string, string>();
+
+        // Simple report fields
+        for (const [dbField, tabKey] of DB_SIMPLE_REPORT_FIELDS) {
+          const val = (pa as unknown as Record<string, unknown>)[dbField];
+          if (val) {
+            tickerReports.set(tabKey, extractReportText(val));
+          }
+        }
+
+        // Structured debate fields
+        if (pa.investment_debate) {
+          tickerReports.set('debate', extractReportText(pa.investment_debate));
+        }
+        if (pa.risk_debate) {
+          tickerReports.set('risk', extractReportText(pa.risk_debate));
+        }
+
+        // Decision / trade_decision
+        if (pa.raw_decision) {
+          tickerReports.set('decision', pa.raw_decision);
+          // Also update decision info
+          if (pa.signal) {
+            newDecisions.set(pa.ticker, {
+              ticker: pa.ticker,
+              signal: pa.signal,
+              confidence: 0.5, // DB doesn't store confidence separately
+              summary: pa.raw_decision,
+            });
+          }
+        }
+
+        if (tickerReports.size > 0) {
+          fullReports.set(pa.ticker, tickerReports);
+        }
+      }
+
+      if (fullReports.size > 0) {
+        setReportsByTicker(fullReports);
+        setDecisions(newDecisions);
+      }
+    }).catch((err) => {
+      // Silently fail - streaming reports remain as fallback
+      console.warn('Failed to fetch full reports from DB:', err);
+    });
+  }, [isComplete, jobId, decisions, setReportsByTicker, setDecisions]);
+
   // Report panel collapsed state
   const [reportsCollapsed, setReportsCollapsed] = useState(false);
+
+  // Tool calls visibility toggle (off by default)
+  const [showToolCalls, setShowToolCalls] = useState(false);
 
   // Copy all reports
   const [copyAllFeedback, setCopyAllFeedback] = useState(false);
@@ -652,10 +969,25 @@ export default function AnalysisLive() {
   }, [activeTicker]);
 
   // Derived data for active ticker
-  const activeEvents = eventsByTicker.get(activeTicker) ?? eventsByTicker.get('_all') ?? [];
   const activeStages = stagesByTicker.get(activeTicker) ?? stagesByTicker.get('_all') ?? new Map();
   const activeReports = reportsByTicker.get(activeTicker) ?? reportsByTicker.get('_all') ?? new Map();
   const activeDecision = decisions.get(activeTicker);
+  const activeTickerDepth = tickerDepths.get(activeTicker);
+
+  // Messages: merge all tickers or filter to selected
+  const activeEvents = useMemo(() => {
+    if (messageTickerFilter === '_all') {
+      // Merge all ticker events, sorted by timestamp
+      const all: StreamEvent[] = [];
+      for (const [, events] of eventsByTicker) {
+        all.push(...events);
+      }
+      return all.sort((a, b) => a.timestamp - b.timestamp);
+    }
+    return eventsByTicker.get(messageTickerFilter) ?? eventsByTicker.get('_all') ?? [];
+  }, [eventsByTicker, messageTickerFilter]);
+
+  const showTickerBadgeInMessages = messageTickerFilter === '_all' && allTickers.length > 1;
 
   // Is the analysis still active (not finished)?
   const jobStatus = job?.status;
@@ -748,7 +1080,14 @@ export default function AnalysisLive() {
 
           {/* Title + progress */}
           <div className="flex items-center gap-3 flex-1 min-w-0">
-            <h1 className="text-sm font-semibold text-gray-200 whitespace-nowrap">Live Analysis</h1>
+            <h1 className="text-sm font-semibold text-gray-200 whitespace-nowrap">
+              Live Analysis
+              {overallDepth && (
+                <span className="ml-1.5 text-xs font-normal text-gray-500">
+                  {' '}&mdash; {overallDepth.charAt(0).toUpperCase() + overallDepth.slice(1)} Depth
+                </span>
+              )}
+            </h1>
             {totalTickers > 0 && (
               <div className="flex items-center gap-2 text-xs text-gray-500">
                 <span>Analyzing {completedTickers}/{totalTickers} positions</span>
@@ -761,6 +1100,13 @@ export default function AnalysisLive() {
                   />
                 </div>
               </div>
+            )}
+            {/* Concurrent indicator */}
+            {concurrentTickers.size > 0 && !isComplete && (
+              <span className="inline-flex items-center gap-1 rounded bg-blue-900/40 px-2 py-0.5 text-xs text-blue-300 font-medium">
+                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                {concurrentTickers.size} concurrent
+              </span>
             )}
           </div>
 
@@ -851,6 +1197,16 @@ export default function AnalysisLive() {
                   aria-selected={activeTicker === ticker}
                 >
                   <span>{ticker}</span>
+                  {(() => {
+                    const depthInfo = tickerDepths.get(ticker);
+                    if (depthInfo) {
+                      const badge = depthBadgeClass(depthInfo.depth);
+                      return (
+                        <span className={`inline-block h-2 w-2 rounded-full ${badge.dot}`} title={`${depthInfo.depth} depth`} />
+                      );
+                    }
+                    return <span className="inline-block h-2 w-2 rounded-full bg-gray-600" title="Pending" />;
+                  })()}
                   <StatusIcon status={status} />
                 </button>
               );
@@ -867,49 +1223,86 @@ export default function AnalysisLive() {
       </header>
 
       {/* ================================================================== */}
-      {/* MAIN CONTENT: Progress (left) + Messages (right) */}
+      {/* MAIN CONTENT: Progress (left) | Reports (center) | Messages (right/bottom) */}
       {/* ================================================================== */}
       <div className="flex-1 flex min-h-0">
         {/* Left: Progress panel */}
-        <aside className="w-64 flex-shrink-0 border-r border-gray-800 overflow-y-auto p-3 hidden md:block">
+        <aside className="w-56 flex-shrink-0 border-r border-gray-800 overflow-y-auto p-3 hidden md:block">
           <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Progress</h2>
-          <ProgressPanel stages={activeStages} currentTicker={activeTicker} />
+          <ProgressPanel stages={activeStages} currentTicker={activeTicker} tickerDepth={activeTickerDepth} concurrentTickers={concurrentTickers} />
         </aside>
 
-        {/* Right: Messages + Reports */}
+        {/* Center: Reports (main content - largest panel) */}
         <main className="flex-1 flex flex-col min-w-0">
-          {/* Messages area */}
-          <div className={`flex-1 min-h-0 p-3 ${reportsCollapsed ? '' : 'max-h-[55vh]'}`}>
+          <div className="flex-1 min-h-0 p-3">
             <div className="flex items-center justify-between mb-2">
-              <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Messages &amp; Tools</h2>
-              <span className="text-xs text-gray-600">{activeEvents.length} events</span>
+              <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Reports</h2>
             </div>
             <div className="h-[calc(100%-1.5rem)]">
-              <MessagesPanel events={activeEvents} />
+              <ReportsPanel
+                reports={activeReports}
+                decision={activeDecision}
+              />
             </div>
           </div>
 
-          {/* Reports area (bottom, collapsible) */}
-          <div className={`flex-shrink-0 border-t border-gray-800 ${reportsCollapsed ? '' : 'h-[40vh]'}`}>
+          {/* Bottom: Messages (collapsed, max 300px) */}
+          <div className={`flex-shrink-0 border-t border-gray-800 ${reportsCollapsed ? '' : 'h-[300px]'}`}>
             <button
               onClick={() => setReportsCollapsed(prev => !prev)}
-              className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider hover:bg-gray-900/50 transition-colors"
+              className="w-full flex items-center justify-between px-3 py-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wider hover:bg-gray-900/50 transition-colors"
               aria-expanded={!reportsCollapsed}
             >
-              <span>Reports</span>
-              <svg
-                className={`w-4 h-4 transition-transform ${reportsCollapsed ? '' : 'rotate-180'}`}
-                fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-              </svg>
+              <div className="flex items-center gap-2">
+                <span>Messages</span>
+                <span className="text-[10px] text-gray-600 normal-case font-normal">{activeEvents.length} events</span>
+              </div>
+              <div className="flex items-center gap-2">
+                {/* Tool calls toggle */}
+                <label
+                  className="flex items-center gap-1.5 cursor-pointer"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <span className="text-[10px] text-gray-500 normal-case font-normal">Show tool calls</span>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setShowToolCalls(prev => !prev); }}
+                    className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
+                      showToolCalls ? 'bg-blue-600' : 'bg-gray-700'
+                    }`}
+                    role="switch"
+                    aria-checked={showToolCalls}
+                    aria-label="Show tool calls"
+                  >
+                    <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                      showToolCalls ? 'translate-x-3.5' : 'translate-x-0.5'
+                    }`} />
+                  </button>
+                </label>
+                {allTickers.length > 1 && (
+                  <select
+                    value={messageTickerFilter}
+                    onChange={(e) => { e.stopPropagation(); setMessageTickerFilter(e.target.value); }}
+                    onClick={(e) => e.stopPropagation()}
+                    className="rounded bg-gray-800 border border-gray-700 px-1.5 py-0.5 text-[10px] text-gray-300 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    aria-label="Filter messages by ticker"
+                  >
+                    <option value="_all">All tickers</option>
+                    {allTickers.map(t => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                )}
+                <svg
+                  className={`w-4 h-4 transition-transform ${reportsCollapsed ? 'rotate-180' : ''}`}
+                  fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                </svg>
+              </div>
             </button>
             {!reportsCollapsed && (
-              <div className="h-[calc(100%-2rem)] px-3 pb-3">
-                <ReportsPanel
-                  reports={activeReports}
-                  decision={activeDecision}
-                />
+              <div className="h-[calc(100%-1.75rem)] px-3 pb-2">
+                <MessagesPanel events={activeEvents} showTickerBadge={showTickerBadgeInMessages} showToolCalls={showToolCalls} />
               </div>
             )}
           </div>
@@ -917,13 +1310,13 @@ export default function AnalysisLive() {
       </div>
 
       {/* Mobile: Progress as a collapsible drawer */}
-      <MobileProgressDrawer stages={activeStages} currentTicker={activeTicker} />
+      <MobileProgressDrawer stages={activeStages} currentTicker={activeTicker} tickerDepth={activeTickerDepth} concurrentTickers={concurrentTickers} />
     </div>
   );
 }
 
 /** Mobile progress drawer shown only on small screens */
-function MobileProgressDrawer({ stages, currentTicker }: { stages: Map<string, AgentStatus>; currentTicker: string }) {
+function MobileProgressDrawer({ stages, currentTicker, tickerDepth, concurrentTickers }: { stages: Map<string, AgentStatus>; currentTicker: string; tickerDepth?: TickerDepthInfo; concurrentTickers?: Set<string> }) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -937,7 +1330,7 @@ function MobileProgressDrawer({ stages, currentTicker }: { stages: Map<string, A
       </button>
       {open && (
         <div className="fixed inset-x-0 bottom-0 bg-gray-950 border-t border-gray-800 p-4 z-40 max-h-[60vh] overflow-y-auto">
-          <ProgressPanel stages={stages} currentTicker={currentTicker} />
+          <ProgressPanel stages={stages} currentTicker={currentTicker} tickerDepth={tickerDepth} concurrentTickers={concurrentTickers} />
         </div>
       )}
     </div>

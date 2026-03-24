@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
                         CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
     mode            TEXT DEFAULT 'portfolio'
                         CHECK (mode IN ('single', 'portfolio', 'all_individual')),
+    depth           TEXT DEFAULT 'auto'
+                        CHECK (depth IN ('auto', 'light', 'medium', 'deep')),
     tickers         TEXT NOT NULL,                             -- JSON array of tickers analyzed
     total_tickers   INTEGER NOT NULL DEFAULT 0,
     completed_tickers INTEGER NOT NULL DEFAULT 0,

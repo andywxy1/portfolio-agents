@@ -10,6 +10,7 @@ class AnalysisJobConfig(BaseModel):
 
 class StartAnalysisRequest(BaseModel):
     mode: Literal["single", "portfolio", "all_individual"] = "portfolio"
+    depth: Literal["auto", "light", "medium", "deep"] = "auto"
     ticker: str | None = None  # required for "single" mode
     tickers: list[str] | None = None
     config: AnalysisJobConfig | None = None
@@ -21,6 +22,7 @@ class StartAnalysisResponse(BaseModel):
     tickers: list[str]
     total_tickers: int
     mode: str = "portfolio"
+    depth: str = "auto"
 
 
 class AnalysisJobListItem(BaseModel):
@@ -28,6 +30,7 @@ class AnalysisJobListItem(BaseModel):
     id: str
     status: str
     mode: str | None = None
+    depth: str | None = "auto"
     created_at: str
     completed_at: str | None = None
     tickers_total: int
@@ -49,6 +52,8 @@ class AnalysisJobResponse(BaseModel):
     id: str
     user_id: str
     status: str
+    mode: str | None = "portfolio"
+    depth: str | None = "auto"
     tickers: list[str]
     total_tickers: int
     completed_tickers: int

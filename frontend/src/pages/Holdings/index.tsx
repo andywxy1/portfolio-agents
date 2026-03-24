@@ -35,7 +35,8 @@ import {
   formatPercent,
   pnlColor,
 } from '../../utils/format';
-import type { HoldingWithPrice, AnalysisMode } from '../../types';
+import { DepthSelector, estimateTime, estimateAutoBreakdown } from '../../components/DepthSelector';
+import type { HoldingWithPrice, AnalysisMode, AnalysisRequestDepth } from '../../types';
 
 export default function Holdings() {
   usePageTitle('Holdings');
@@ -69,6 +70,9 @@ export default function Holdings() {
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('portfolio');
   const [analysisDropdownOpen, setAnalysisDropdownOpen] = useState(false);
   const analysisDropdownRef = useRef<HTMLDivElement>(null);
+  const [selectedDepth, setSelectedDepth] = useState<AnalysisRequestDepth>('auto');
+  const [singleTickerPopover, setSingleTickerPopover] = useState<string | null>(null);
+  const singleTickerPopoverRef = useRef<HTMLDivElement>(null);
 
   // Ticker validation (Item 11)
   const [tickerInput, setTickerInput] = useState('');
@@ -163,6 +167,18 @@ export default function Holdings() {
     return () => document.removeEventListener('mousedown', handler);
   }, [analysisDropdownOpen]);
 
+  // Close single-ticker depth popover on outside click
+  useEffect(() => {
+    if (!singleTickerPopover) return;
+    const handler = (e: MouseEvent) => {
+      if (singleTickerPopoverRef.current && !singleTickerPopoverRef.current.contains(e.target as Node)) {
+        setSingleTickerPopover(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [singleTickerPopover]);
+
   // Keyboard shortcuts (Item 12)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -243,11 +259,13 @@ export default function Holdings() {
     });
   }, [deleteMutation, holdings, toast]);
 
-  const handleStartAnalysis = useCallback((mode: AnalysisMode = 'portfolio', ticker?: string) => {
+  const handleStartAnalysis = useCallback((mode: AnalysisMode = 'portfolio', ticker?: string, depth?: AnalysisRequestDepth) => {
     setAnalysisConfirmOpen(false);
     setAnalysisDropdownOpen(false);
+    setSingleTickerPopover(null);
+    const depthToSend = depth ?? selectedDepth;
     analysisMutation.mutate(
-      { mode, ...(ticker ? { ticker } : {}) },
+      { mode, ...(ticker ? { ticker } : {}), depth: depthToSend },
       {
         onSuccess: (result) => {
           setActiveAnalysisJob(result.job_id);
@@ -265,7 +283,7 @@ export default function Holdings() {
                     onSuccess: () => {
                       toast.info('Previous analysis cancelled. Retrying...');
                       // Retry after a short delay to let the backend settle
-                      setTimeout(() => handleStartAnalysis(mode, ticker), 500);
+                      setTimeout(() => handleStartAnalysis(mode, ticker, depthToSend), 500);
                     },
                     onError: (cancelErr) => {
                       toast.error(`Failed to cancel: ${cancelErr.message}`);
@@ -280,7 +298,7 @@ export default function Holdings() {
         },
       }
     );
-  }, [analysisMutation, cancelMutation, navigate, toast]);
+  }, [analysisMutation, cancelMutation, navigate, toast, selectedDepth]);
 
   // Check for any stale prices (Item 16)
   const hasStalePrice = useMemo(
@@ -418,23 +436,38 @@ export default function Holdings() {
         }
         return (
           <div className="flex gap-1">
-            <button
-              onClick={() => handleStartAnalysis('single', row.original.ticker)}
-              disabled={analysisMutation.isPending}
-              className="rounded px-1.5 py-1 text-xs font-medium text-emerald-600 hover:bg-emerald-50 disabled:opacity-50"
-              title={`Analyze ${row.original.ticker}`}
-            >
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-              </svg>
-            </button>
+            <div className="relative" ref={singleTickerPopover === row.original.ticker ? singleTickerPopoverRef : undefined}>
+              <button
+                onClick={() => setSingleTickerPopover(prev => prev === row.original.ticker ? null : row.original.ticker)}
+                disabled={analysisMutation.isPending}
+                className="rounded px-1.5 py-1 text-xs font-medium text-emerald-600 hover:bg-emerald-50 disabled:opacity-50"
+                title={`Analyze ${row.original.ticker}`}
+              >
+                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                </svg>
+              </button>
+              {singleTickerPopover === row.original.ticker && (
+                <div className="absolute right-0 top-full z-30 mt-1 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg">
+                  <p className="text-xs font-semibold text-gray-900 mb-2">Analyze {row.original.ticker}</p>
+                  <DepthSelector value={selectedDepth} onChange={(d) => { setSelectedDepth(d); }} compact />
+                  <button
+                    onClick={() => handleStartAnalysis('single', row.original.ticker)}
+                    disabled={analysisMutation.isPending}
+                    className="mt-2 w-full rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
+                  >
+                    {analysisMutation.isPending ? 'Starting...' : 'Start Analysis'}
+                  </button>
+                </div>
+              )}
+            </div>
             <button onClick={() => startEdit(row.original)} className="rounded px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50">Edit</button>
             <button onClick={() => setDeleteConfirmId(row.original.id)} className="rounded px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50">Delete</button>
           </div>
         );
       },
     },
-  ], [editingId, editValues, savingIndicator, handleEditChange, cancelEdit, startEdit, handleStartAnalysis, analysisMutation.isPending]);
+  ], [editingId, editValues, savingIndicator, handleEditChange, cancelEdit, startEdit, handleStartAnalysis, analysisMutation.isPending, singleTickerPopover, selectedDepth]);
 
   const table = useReactTable({
     data: holdings ?? [],
@@ -754,16 +787,38 @@ export default function Holdings() {
 
       <ConfirmDialog
         open={analysisConfirmOpen}
-        title={analysisMode === 'all_individual' ? 'Analyze All (Full Depth)' : 'Analyze Portfolio'}
-        message={
-          analysisMode === 'all_individual'
-            ? `This will run full analysis on all ${holdings?.length ?? 0} positions and may take a while. Continue?`
-            : `Analyze ${holdings?.length ?? 0} position${(holdings?.length ?? 0) !== 1 ? 's' : ''} with tiered depth and portfolio synthesis?`
-        }
+        title={analysisMode === 'all_individual' ? 'Analyze All' : 'Analyze Portfolio'}
         confirmLabel="Start Analysis"
         onConfirm={() => handleStartAnalysis(analysisMode)}
-        onCancel={() => setAnalysisConfirmOpen(false)}
-      />
+        onCancel={() => { setAnalysisConfirmOpen(false); setSelectedDepth('auto'); }}
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600">
+            {holdings?.length ?? 0} position{(holdings?.length ?? 0) !== 1 ? 's' : ''} will be analyzed.
+          </p>
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-2">Analysis Depth</label>
+            <DepthSelector value={selectedDepth} onChange={setSelectedDepth} />
+          </div>
+
+          <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2.5 text-xs text-gray-600 space-y-1">
+            <div className="flex justify-between">
+              <span>Estimated time</span>
+              <span className="font-semibold text-gray-900">{estimateTime(holdings?.length ?? 0, selectedDepth)}</span>
+            </div>
+            {selectedDepth === 'auto' && (holdings?.length ?? 0) > 0 && (() => {
+              const breakdown = estimateAutoBreakdown(holdings?.length ?? 0);
+              return (
+                <div className="flex justify-between text-gray-500">
+                  <span>Estimated breakdown</span>
+                  <span>{breakdown.deep} deep, {breakdown.medium} medium, {breakdown.light} light</span>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      </ConfirmDialog>
     </div>
   );
 }
