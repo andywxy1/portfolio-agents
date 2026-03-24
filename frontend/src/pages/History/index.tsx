@@ -215,13 +215,13 @@ function JobCard({
         </div>
         <div className="flex items-center gap-3">
           <div className="flex gap-1">
-            {job.tickers.slice(0, 5).map(t => (
+            {(job.tickers ?? []).slice(0, 5).map(t => (
               <span key={t} className="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600">
                 {t}
               </span>
             ))}
-            {job.tickers.length > 5 && (
-              <span className="text-xs text-gray-400">+{job.tickers.length - 5}</span>
+            {(job.tickers ?? []).length > 5 && (
+              <span className="text-xs text-gray-400">+{(job.tickers ?? []).length - 5}</span>
             )}
           </div>
           <svg
@@ -234,7 +234,7 @@ function JobCard({
         </div>
       </button>
 
-      {isExpanded && job.position_analyses && (
+      {isExpanded && Array.isArray(job.position_analyses) && job.position_analyses.length > 0 && (
         <div className="border-t border-gray-100 px-6 py-4">
           <div className="space-y-2">
             {job.position_analyses.map(pa => (

@@ -27,6 +27,7 @@ import { EmptyState } from '../../components/EmptyState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useToast } from '../../components/Toast';
 import { usePageTitle } from '../../hooks/usePageTitle';
+import { setActiveAnalysisJob } from '../../hooks/useActiveAnalysis';
 import {
   formatCurrency,
   formatPnl,
@@ -249,6 +250,7 @@ export default function Holdings() {
       { mode, ...(ticker ? { ticker } : {}) },
       {
         onSuccess: (result) => {
+          setActiveAnalysisJob(result.job_id);
           toast.info(`Analysis started for ${result.total_tickers} position${result.total_tickers !== 1 ? 's' : ''}`);
           navigate(`/analysis/progress/${result.job_id}`);
         },

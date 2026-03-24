@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom';
+import { useActiveAnalysisJob } from '../hooks/useActiveAnalysis';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: DashboardIcon },
@@ -13,6 +14,8 @@ interface SidebarProps {
 }
 
 export function Sidebar({ onClose }: SidebarProps) {
+  const activeJobId = useActiveAnalysisJob();
+
   return (
     <aside className="flex h-full w-64 flex-col bg-slate-900 text-slate-300">
       {/* Brand */}
@@ -59,6 +62,26 @@ export function Sidebar({ onClose }: SidebarProps) {
             <span className="truncate">{label}</span>
           </NavLink>
         ))}
+
+        {/* Live Analysis link - visible only when an analysis is actively running */}
+        {activeJobId && (
+          <NavLink
+            to={`/analysis/progress/${activeJobId}`}
+            className={({ isActive }) =>
+              `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                isActive
+                  ? 'bg-emerald-900/40 text-emerald-300'
+                  : 'text-emerald-400 hover:bg-emerald-900/20 hover:text-emerald-300'
+              }`
+            }
+          >
+            <span className="relative flex h-5 w-5 flex-shrink-0 items-center justify-center">
+              <span className="absolute inline-flex h-3 w-3 animate-ping rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+            </span>
+            <span className="truncate">Live Analysis</span>
+          </NavLink>
+        )}
       </nav>
 
       {/* Settings + Footer */}

@@ -1,6 +1,7 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { usePageTitle } from '../../hooks/usePageTitle';
+import { clearActiveAnalysisJob } from '../../hooks/useActiveAnalysis';
 import { useToast } from '../../components/Toast';
 import { useAnalysisJob, useCancelAnalysis } from '../../api/hooks';
 import {
@@ -600,11 +601,12 @@ export default function AnalysisLive() {
   // Sound toggle
   const [soundEnabled, setSoundEnabled] = useState(false);
 
-  // Play ding on completion
+  // Play ding on completion & clear active job tracker
   const prevComplete = useRef(isComplete);
   useEffect(() => {
-    if (isComplete && !prevComplete.current && soundEnabled) {
-      playDing();
+    if (isComplete && !prevComplete.current) {
+      if (soundEnabled) playDing();
+      clearActiveAnalysisJob();
     }
     prevComplete.current = isComplete;
   }, [isComplete, soundEnabled]);
@@ -663,6 +665,7 @@ export default function AnalysisLive() {
     if (!jobId) return;
     cancelMutation.mutate(jobId, {
       onSuccess: () => {
+        clearActiveAnalysisJob();
         toast.success('Analysis cancellation requested');
       },
       onError: (err) => {
