@@ -18,12 +18,96 @@ import traceback
 from datetime import date
 from typing import TYPE_CHECKING, Any, Optional
 
+from langchain_core.callbacks import BaseCallbackHandler
+
 from app.config import settings
 
 if TYPE_CHECKING:
     from app.services.event_stream import AnalysisEventStream
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# LangChain callback handler for streaming events
+# ---------------------------------------------------------------------------
+
+
+class _StreamingCallbackHandler(BaseCallbackHandler):
+    """Emits fine-grained events for LLM and tool activity.
+
+    Attached to the LLM clients (via the TradingAgentsGraph ``callbacks``
+    parameter) and to the graph runtime config (for tool nodes).  This
+    provides live updates even when the graph stream itself only fires
+    once per completed node.
+    """
+
+    def __init__(
+        self,
+        event_stream: AnalysisEventStream,
+        ticker: str,
+    ) -> None:
+        super().__init__()
+        self.stream = event_stream
+        self.ticker = ticker
+        # Track current agent for context (set externally by the streaming loop)
+        self.current_agent: str = ""
+
+    # -- LLM events ---------------------------------------------------------
+
+    def on_llm_start(
+        self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any
+    ) -> None:
+        agent = self.current_agent or kwargs.get("name", "LLM")
+        logger.debug("[callback] on_llm_start agent=%s", agent)
+        self.stream.emit("agent_activity", {
+            "agent": agent,
+            "activity": "thinking",
+            "ticker": self.ticker,
+        })
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        agent = self.current_agent or "LLM"
+        # Extract text from the response
+        text = ""
+        try:
+            if hasattr(response, "generations") and response.generations:
+                gen = response.generations[0]
+                if isinstance(gen, list) and gen:
+                    text = gen[0].text or ""
+                elif hasattr(gen, "text"):
+                    text = gen.text or ""
+        except Exception:
+            pass
+        if text:
+            self.stream.emit("agent_message", {
+                "agent": agent,
+                "content": text[:500],
+                "ticker": self.ticker,
+            })
+
+    # -- Tool events --------------------------------------------------------
+
+    def on_tool_start(
+        self, serialized: dict[str, Any], input_str: str, **kwargs: Any
+    ) -> None:
+        tool_name = serialized.get("name", "") or kwargs.get("name", "tool")
+        agent = self.current_agent or "Agent"
+        logger.debug("[callback] on_tool_start tool=%s agent=%s", tool_name, agent)
+        self.stream.emit("tool_call", {
+            "agent": agent,
+            "tool": tool_name,
+            "params": input_str[:200] if isinstance(input_str, str) else str(input_str)[:200],
+            "ticker": self.ticker,
+        })
+
+    def on_tool_end(self, output: str, **kwargs: Any) -> None:
+        agent = self.current_agent or "Agent"
+        self.stream.emit("tool_result", {
+            "agent": agent,
+            "result_preview": str(output)[:300] if output else "",
+            "ticker": self.ticker,
+        })
 
 # ---------------------------------------------------------------------------
 # Analyst sets per tier
@@ -361,13 +445,30 @@ class PipelineAdapter:
     ) -> dict[str, Any]:
         """Stream the LangGraph execution, emitting events for each node.
 
-        The TradingAgents graph uses ``stream_mode="values"`` which means
-        each chunk is the **full state snapshot** after a node completes.
-        We diff consecutive snapshots to determine which node ran and
-        what changed.
+        Uses ``stream_mode="updates"`` so each chunk is a dict mapping
+        ``{node_name: state_delta}``.  The node name keys correspond
+        exactly to the names registered in ``setup.py`` (e.g.
+        ``"Market Analyst"``, ``"tools_market"``, ``"Bull Researcher"``).
+
+        A ``_StreamingCallbackHandler`` is also attached to the LLM
+        clients and graph runtime to capture fine-grained tool and LLM
+        events that fire *within* a single node execution.
         """
         try:
             from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+            logger.info(
+                "[streaming] Starting streaming analysis for %s depth=%s "
+                "analysts=%s debate_rounds=%d risk_rounds=%d",
+                ticker,
+                "custom",
+                analysts,
+                max_debate_rounds,
+                max_risk_discuss_rounds,
+            )
+
+            # Create callback handler for fine-grained LLM/tool events
+            cb_handler = _StreamingCallbackHandler(event_stream, ticker)
 
             config = _build_graph_config(
                 max_debate_rounds=max_debate_rounds,
@@ -378,90 +479,149 @@ class PipelineAdapter:
                 selected_analysts=analysts,
                 debug=False,
                 config=config,
+                callbacks=[cb_handler],
             )
 
-            # Build initial state and stream args (same as propagate())
+            # Build initial state
             init_state = graph_obj.propagator.create_initial_state(ticker, trade_date)
-            stream_args = graph_obj.propagator.get_graph_args()
 
-            prev_state: dict[str, Any] | None = None
-            final_state: dict[str, Any] = init_state
+            # Override stream_mode to "updates" so chunks are {node_name: delta}
+            # Also pass callbacks into the runtime config for tool nodes
+            stream_config = {
+                "recursion_limit": config.get("max_recur_limit", 100),
+                "callbacks": [cb_handler],
+            }
+
+            # Accumulate state from deltas so we have the full final state
+            accumulated_state: dict[str, Any] = dict(init_state)
             last_node: str | None = None
+            chunk_count = 0
 
-            for chunk in graph_obj.graph.stream(init_state, **stream_args):
-                # In "values" stream mode, each chunk is a full state dict.
-                final_state = chunk
+            logger.debug("[streaming] Beginning graph.stream() for %s", ticker)
 
-                # Determine which node produced this state by checking the
-                # ``sender`` key which TradingAgents agents set.
-                current_sender = chunk.get("sender", "")
-                node_name = current_sender or ""
+            for chunk in graph_obj.graph.stream(
+                init_state,
+                stream_mode="updates",
+                config=stream_config,
+            ):
+                chunk_count += 1
 
-                # Skip internal nodes (tool calls, message clears)
-                display = _NODE_DISPLAY_MAP.get(node_name)
-                if display is None:
-                    prev_state = chunk
+                # With stream_mode="updates", chunk is {node_name: state_delta}
+                if not isinstance(chunk, dict):
+                    logger.debug(
+                        "[streaming] chunk #%d unexpected type: %s",
+                        chunk_count,
+                        type(chunk).__name__,
+                    )
                     continue
 
-                team, agent = display
+                for node_name, state_delta in chunk.items():
+                    logger.debug(
+                        "[streaming] chunk #%d node=%r delta_keys=%s",
+                        chunk_count,
+                        node_name,
+                        list(state_delta.keys()) if isinstance(state_delta, dict) else "N/A",
+                    )
 
-                # Emit stage_start if this is a new node
-                if node_name != last_node:
-                    # Close previous stage
-                    if last_node and last_node in _NODE_DISPLAY_MAP:
-                        prev_team, prev_agent = _NODE_DISPLAY_MAP[last_node]
-                        event_stream.emit("stage_complete", {
-                            "team": prev_team,
-                            "agent": prev_agent,
-                            "ticker": ticker,
-                            "status": "completed",
-                        })
-                    event_stream.emit("stage_start", {
-                        "team": team,
-                        "agent": agent,
-                        "ticker": ticker,
-                    })
-                    last_node = node_name
+                    # Merge delta into accumulated state
+                    if isinstance(state_delta, dict):
+                        for key, val in state_delta.items():
+                            # For messages, append rather than replace
+                            if key == "messages" and isinstance(val, list):
+                                existing = accumulated_state.get("messages", [])
+                                if isinstance(existing, list):
+                                    accumulated_state["messages"] = existing + val
+                                else:
+                                    accumulated_state["messages"] = val
+                            else:
+                                accumulated_state[key] = val
 
-                # Extract messages from the state
-                messages = chunk.get("messages", [])
-                if messages:
-                    # Process the last message (the one this node produced)
-                    msg = messages[-1]
-                    content = getattr(msg, "content", None) or str(msg)
-                    tool_calls = getattr(msg, "tool_calls", None)
+                    # Check if this is a display-worthy node
+                    display = _NODE_DISPLAY_MAP.get(node_name)
 
-                    if tool_calls:
-                        for tc in tool_calls:
-                            tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-                            tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-                            event_stream.emit("tool_call", {
+                    if display is not None:
+                        team, agent = display
+                        cb_handler.current_agent = agent
+
+                        # Emit stage transitions
+                        if node_name != last_node:
+                            # Close previous stage
+                            if last_node and last_node in _NODE_DISPLAY_MAP:
+                                prev_team, prev_agent = _NODE_DISPLAY_MAP[last_node]
+                                event_stream.emit("stage_complete", {
+                                    "team": prev_team,
+                                    "agent": prev_agent,
+                                    "ticker": ticker,
+                                    "status": "completed",
+                                })
+
+                            event_stream.emit("stage_start", {
+                                "team": team,
                                 "agent": agent,
-                                "tool": tc_name,
-                                "params": tc_args,
                                 "ticker": ticker,
                             })
-                    elif content:
-                        event_stream.emit("agent_message", {
-                            "agent": agent,
-                            "content": content[:500],
-                            "ticker": ticker,
-                        })
+                            last_node = node_name
 
-                # Detect report changes by comparing with previous state
-                if prev_state is not None:
-                    for report_key in _REPORT_KEYS:
-                        old_val = prev_state.get(report_key, "")
-                        new_val = chunk.get(report_key, "")
-                        if new_val and new_val != old_val:
-                            event_stream.emit("report", {
-                                "agent": agent,
-                                "report_type": report_key.replace("_report", ""),
-                                "content": new_val[:2000] if isinstance(new_val, str) else str(new_val)[:2000],
-                                "ticker": ticker,
-                            })
+                        # Extract messages from the delta
+                        if isinstance(state_delta, dict):
+                            messages = state_delta.get("messages", [])
+                            if messages:
+                                msg = messages[-1]
+                                content = getattr(msg, "content", None) or ""
+                                tool_calls = getattr(msg, "tool_calls", None)
 
-                prev_state = chunk
+                                if tool_calls:
+                                    for tc in tool_calls:
+                                        tc_name = (
+                                            tc.get("name", "")
+                                            if isinstance(tc, dict)
+                                            else getattr(tc, "name", "")
+                                        )
+                                        tc_args = (
+                                            tc.get("args", {})
+                                            if isinstance(tc, dict)
+                                            else getattr(tc, "args", {})
+                                        )
+                                        event_stream.emit("tool_call", {
+                                            "agent": agent,
+                                            "tool": tc_name,
+                                            "params": tc_args,
+                                            "ticker": ticker,
+                                        })
+                                elif content:
+                                    event_stream.emit("agent_message", {
+                                        "agent": agent,
+                                        "content": content[:500],
+                                        "ticker": ticker,
+                                    })
+
+                            # Detect report additions in the delta
+                            for report_key in _REPORT_KEYS:
+                                new_val = state_delta.get(report_key)
+                                if new_val:
+                                    event_stream.emit("report", {
+                                        "agent": agent,
+                                        "report_type": report_key.replace("_report", ""),
+                                        "content": (
+                                            new_val[:2000]
+                                            if isinstance(new_val, str)
+                                            else str(new_val)[:2000]
+                                        ),
+                                        "ticker": ticker,
+                                    })
+
+                    else:
+                        # Non-display node (tool node or message-clear node).
+                        # Still log for diagnostics.
+                        logger.debug(
+                            "[streaming] skipping non-display node %r", node_name
+                        )
+
+            logger.info(
+                "[streaming] graph.stream() finished for %s after %d chunks",
+                ticker,
+                chunk_count,
+            )
 
             # Close the final stage
             if last_node and last_node in _NODE_DISPLAY_MAP:
@@ -474,6 +634,7 @@ class PipelineAdapter:
                 })
 
             # Process signal and emit decision
+            final_state = accumulated_state
             decision = graph_obj.process_signal(
                 final_state.get("final_trade_decision", "")
             )
@@ -482,7 +643,7 @@ class PipelineAdapter:
             event_stream.emit("decision", {
                 "ticker": ticker,
                 "signal": result.get("signal", "HOLD"),
-                "confidence": None,  # TradingAgents doesn't output a confidence score
+                "confidence": None,
                 "summary": (result.get("raw_decision") or "")[:500],
             })
 
@@ -494,6 +655,9 @@ class PipelineAdapter:
             return result
 
         except Exception as exc:
+            logger.exception(
+                "[streaming] Exception during streaming analysis for %s", ticker
+            )
             event_stream.emit("error", {
                 "ticker": ticker,
                 "agent": "",
