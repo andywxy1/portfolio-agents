@@ -10,13 +10,18 @@ avoid state leakage between tickers.  All calls are synchronous --
 they are expected to be invoked from a background thread.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import traceback
 from datetime import date
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from app.config import settings
+
+if TYPE_CHECKING:
+    from app.services.event_stream import AnalysisEventStream
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +31,33 @@ logger = logging.getLogger(__name__)
 _ANALYSTS_HEAVY = ["market", "social", "news", "fundamentals"]
 _ANALYSTS_MEDIUM = ["market", "fundamentals"]
 _ANALYSTS_LIGHT = ["fundamentals"]
+
+# Map LangGraph node names (as defined in setup.py) to (team, display_name).
+# Node names that are internal (tool calls, message clears) are excluded --
+# they are filtered out during streaming so only meaningful agent steps are
+# surfaced to the frontend.
+_NODE_DISPLAY_MAP: dict[str, tuple[str, str]] = {
+    "Market Analyst": ("Analyst Team", "Market Analyst"),
+    "Social Analyst": ("Analyst Team", "Social Analyst"),
+    "News Analyst": ("Analyst Team", "News Analyst"),
+    "Fundamentals Analyst": ("Analyst Team", "Fundamentals Analyst"),
+    "Bull Researcher": ("Research Team", "Bull Researcher"),
+    "Bear Researcher": ("Research Team", "Bear Researcher"),
+    "Research Manager": ("Research Team", "Research Manager"),
+    "Trader": ("Trading Team", "Trader"),
+    "Aggressive Analyst": ("Risk Management", "Aggressive Analyst"),
+    "Neutral Analyst": ("Risk Management", "Neutral Analyst"),
+    "Conservative Analyst": ("Risk Management", "Conservative Analyst"),
+    "Portfolio Manager": ("Portfolio Management", "Portfolio Manager"),
+}
+
+# State keys that hold analyst reports.
+_REPORT_KEYS = [
+    "market_report",
+    "sentiment_report",
+    "news_report",
+    "fundamentals_report",
+]
 
 
 def _build_graph_config(
@@ -272,8 +304,202 @@ class PipelineAdapter:
         return method(ticker, trade_date)
 
     # ------------------------------------------------------------------
+    # Streaming variant (emits events to an AnalysisEventStream)
+    # ------------------------------------------------------------------
+
+    def analyze_ticker_streaming(
+        self,
+        ticker: str,
+        depth: str = "full",
+        trade_date: Optional[str] = None,
+        event_stream: Optional[AnalysisEventStream] = None,
+    ) -> dict[str, Any]:
+        """Run analysis with live event streaming.
+
+        Falls back to the non-streaming path when *event_stream* is None.
+        """
+        if event_stream is None:
+            return self.analyze_ticker(ticker, depth, trade_date)
+
+        trade_date = trade_date or _today()
+
+        # Resolve analysts + debate config from depth
+        depth_config = {
+            "full": (_ANALYSTS_HEAVY, settings.max_debate_rounds, settings.max_risk_discuss_rounds),
+            "heavy": (_ANALYSTS_HEAVY, settings.max_debate_rounds, settings.max_risk_discuss_rounds),
+            "standard": (_ANALYSTS_MEDIUM, 1, 1),
+            "medium": (_ANALYSTS_MEDIUM, 1, 1),
+            "quick": (_ANALYSTS_LIGHT, 0, 0),
+            "light": (_ANALYSTS_LIGHT, 0, 0),
+        }
+        analysts, debate_rounds, risk_rounds = depth_config.get(
+            depth, (_ANALYSTS_MEDIUM, 1, 1)
+        )
+
+        return self._run_streaming(
+            ticker=ticker,
+            trade_date=trade_date,
+            analysts=analysts,
+            max_debate_rounds=debate_rounds,
+            max_risk_discuss_rounds=risk_rounds,
+            event_stream=event_stream,
+        )
+
+    # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _run_streaming(
+        self,
+        *,
+        ticker: str,
+        trade_date: str,
+        analysts: list[str],
+        max_debate_rounds: int,
+        max_risk_discuss_rounds: int,
+        event_stream: AnalysisEventStream,
+    ) -> dict[str, Any]:
+        """Stream the LangGraph execution, emitting events for each node.
+
+        The TradingAgents graph uses ``stream_mode="values"`` which means
+        each chunk is the **full state snapshot** after a node completes.
+        We diff consecutive snapshots to determine which node ran and
+        what changed.
+        """
+        try:
+            from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+            config = _build_graph_config(
+                max_debate_rounds=max_debate_rounds,
+                max_risk_discuss_rounds=max_risk_discuss_rounds,
+            )
+
+            graph_obj = TradingAgentsGraph(
+                selected_analysts=analysts,
+                debug=False,
+                config=config,
+            )
+
+            # Build initial state and stream args (same as propagate())
+            init_state = graph_obj.propagator.create_initial_state(ticker, trade_date)
+            stream_args = graph_obj.propagator.get_graph_args()
+
+            prev_state: dict[str, Any] | None = None
+            final_state: dict[str, Any] = init_state
+            last_node: str | None = None
+
+            for chunk in graph_obj.graph.stream(init_state, **stream_args):
+                # In "values" stream mode, each chunk is a full state dict.
+                final_state = chunk
+
+                # Determine which node produced this state by checking the
+                # ``sender`` key which TradingAgents agents set.
+                current_sender = chunk.get("sender", "")
+                node_name = current_sender or ""
+
+                # Skip internal nodes (tool calls, message clears)
+                display = _NODE_DISPLAY_MAP.get(node_name)
+                if display is None:
+                    prev_state = chunk
+                    continue
+
+                team, agent = display
+
+                # Emit stage_start if this is a new node
+                if node_name != last_node:
+                    # Close previous stage
+                    if last_node and last_node in _NODE_DISPLAY_MAP:
+                        prev_team, prev_agent = _NODE_DISPLAY_MAP[last_node]
+                        event_stream.emit("stage_complete", {
+                            "team": prev_team,
+                            "agent": prev_agent,
+                            "ticker": ticker,
+                            "status": "completed",
+                        })
+                    event_stream.emit("stage_start", {
+                        "team": team,
+                        "agent": agent,
+                        "ticker": ticker,
+                    })
+                    last_node = node_name
+
+                # Extract messages from the state
+                messages = chunk.get("messages", [])
+                if messages:
+                    # Process the last message (the one this node produced)
+                    msg = messages[-1]
+                    content = getattr(msg, "content", None) or str(msg)
+                    tool_calls = getattr(msg, "tool_calls", None)
+
+                    if tool_calls:
+                        for tc in tool_calls:
+                            tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                            tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                            event_stream.emit("tool_call", {
+                                "agent": agent,
+                                "tool": tc_name,
+                                "params": tc_args,
+                                "ticker": ticker,
+                            })
+                    elif content:
+                        event_stream.emit("agent_message", {
+                            "agent": agent,
+                            "content": content[:500],
+                            "ticker": ticker,
+                        })
+
+                # Detect report changes by comparing with previous state
+                if prev_state is not None:
+                    for report_key in _REPORT_KEYS:
+                        old_val = prev_state.get(report_key, "")
+                        new_val = chunk.get(report_key, "")
+                        if new_val and new_val != old_val:
+                            event_stream.emit("report", {
+                                "agent": agent,
+                                "report_type": report_key.replace("_report", ""),
+                                "content": new_val[:2000] if isinstance(new_val, str) else str(new_val)[:2000],
+                                "ticker": ticker,
+                            })
+
+                prev_state = chunk
+
+            # Close the final stage
+            if last_node and last_node in _NODE_DISPLAY_MAP:
+                prev_team, prev_agent = _NODE_DISPLAY_MAP[last_node]
+                event_stream.emit("stage_complete", {
+                    "team": prev_team,
+                    "agent": prev_agent,
+                    "ticker": ticker,
+                    "status": "completed",
+                })
+
+            # Process signal and emit decision
+            decision = graph_obj.process_signal(
+                final_state.get("final_trade_decision", "")
+            )
+            result = _extract_result(final_state, decision)
+
+            event_stream.emit("decision", {
+                "ticker": ticker,
+                "signal": result.get("signal", "HOLD"),
+                "confidence": None,  # TradingAgents doesn't output a confidence score
+                "summary": (result.get("raw_decision") or "")[:500],
+            })
+
+            logger.info(
+                "Streaming analysis complete for %s: signal=%s",
+                ticker,
+                result["signal"],
+            )
+            return result
+
+        except Exception as exc:
+            event_stream.emit("error", {
+                "ticker": ticker,
+                "agent": "",
+                "message": str(exc),
+            })
+            return _error_result(ticker, exc)
 
     def _run(
         self,

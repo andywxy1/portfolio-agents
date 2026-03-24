@@ -10,7 +10,7 @@ import { useConfigStatus } from './api/hooks';
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Holdings = lazy(() => import('./pages/Holdings'));
 const Analysis = lazy(() => import('./pages/Analysis'));
-const AnalysisProgress = lazy(() => import('./pages/AnalysisProgress'));
+const AnalysisLive = lazy(() => import('./pages/AnalysisLive'));
 const Recommendations = lazy(() => import('./pages/Recommendations'));
 const History = lazy(() => import('./pages/History'));
 const Setup = lazy(() => import('./pages/Setup'));
@@ -85,7 +85,7 @@ function AppRoutes() {
             path="analysis/progress/:jobId"
             element={
               <Suspense fallback={<LoadingSpinner />}>
-                <AnalysisProgress />
+                <AnalysisLive />
               </Suspense>
             }
           />

@@ -27,6 +27,11 @@ from app.models.analysis import AnalysisJob, PortfolioInsight, PositionAnalysis
 from app.models.holding import Holding
 from app.models.recommendation import Recommendation
 from app.models.report import Report
+from app.services.event_stream import (
+    AnalysisEventStream,
+    create_event_stream,
+    get_event_stream,
+)
 from app.services.pipeline_adapter import PipelineAdapter
 from app.services.portfolio import TICKER_SECTOR_MAP, get_sector
 from app.services.recommendation_generator import generate_recommendations
@@ -46,7 +51,12 @@ class AnalysisRunner:
         self._lock = threading.Lock()
 
     def submit_job(self, job_id: str, config: dict[str, Any] | None = None) -> None:
-        """Submit a job to the background executor (non-blocking)."""
+        """Submit a job to the background executor (non-blocking).
+
+        Creates an AnalysisEventStream for this job so that SSE clients
+        can subscribe to live progress updates.
+        """
+        create_event_stream(job_id)
         self._executor.submit(self._run_job, job_id, config or {})
 
     def cancel_job(self, job_id: str) -> None:
@@ -71,13 +81,22 @@ class AnalysisRunner:
     def _run_job(self, job_id: str, config: dict[str, Any]) -> None:
         """Synchronous job execution in background thread."""
         db = SessionLocal()
+        event_stream = get_event_stream(job_id)
         try:
             self._execute(db, job_id, config)
         except Exception:
             logger.exception("Job %s failed with unexpected error", job_id)
             self._fail_job(db, job_id, "Internal error during analysis execution")
+            if event_stream:
+                event_stream.emit("error", {
+                    "ticker": "",
+                    "agent": "",
+                    "message": "Internal error during analysis execution",
+                })
         finally:
             self._clear_cancelled(job_id)
+            if event_stream:
+                event_stream.mark_complete()
             db.close()
 
     def _execute(self, db: Session, job_id: str, config: dict[str, Any]) -> None:
@@ -129,6 +148,15 @@ class AnalysisRunner:
 
         completed_count = 0
         position_summaries: list[dict[str, Any]] = []
+        event_stream = get_event_stream(job_id)
+
+        # Emit initial job status
+        if event_stream:
+            event_stream.emit("job_status", {
+                "status": "running",
+                "tickers_completed": 0,
+                "tickers_total": len(tickers),
+            })
 
         for ticker in tickers:
             # Check for cancellation between ticker analyses
@@ -163,8 +191,12 @@ class AnalysisRunner:
                 db.add(pa)
                 db.commit()
 
-                # Run analysis via the tiered adapter (blocking)
-                result = self._adapter.analyze_ticker(ticker, depth)
+                # Run analysis via the tiered adapter (blocking).
+                # Use the streaming variant when an event stream exists so
+                # that SSE clients get live progress updates.
+                result = self._adapter.analyze_ticker_streaming(
+                    ticker, depth, event_stream=event_stream,
+                )
 
                 # Check for pipeline-level errors
                 if result.get("signal") == "ERROR":
@@ -175,6 +207,12 @@ class AnalysisRunner:
                     completed_count += 1
                     job.completed_tickers = completed_count
                     db.commit()
+                    if event_stream:
+                        event_stream.emit("job_status", {
+                            "status": "running",
+                            "tickers_completed": completed_count,
+                            "tickers_total": len(tickers),
+                        })
                     # Still include in summaries so the synthesis knows it failed
                     position_summaries.append({
                         "ticker": ticker,
@@ -215,6 +253,12 @@ class AnalysisRunner:
                 completed_count += 1
                 job.completed_tickers = completed_count
                 db.commit()
+                if event_stream:
+                    event_stream.emit("job_status", {
+                        "status": "running",
+                        "tickers_completed": completed_count,
+                        "tickers_total": len(tickers),
+                    })
 
             except Exception:
                 logger.exception(
@@ -242,6 +286,12 @@ class AnalysisRunner:
                 completed_count += 1
                 job.completed_tickers = completed_count
                 db.commit()
+                if event_stream:
+                    event_stream.emit("job_status", {
+                        "status": "running",
+                        "tickers_completed": completed_count,
+                        "tickers_total": len(tickers),
+                    })
 
         # ---------------------------------------------------------------
         # Portfolio-level synthesis + recommendations
@@ -291,12 +341,24 @@ class AnalysisRunner:
             job.completed_at = utc_now()
             db.commit()
             logger.info("Job %s completed successfully", job_id)
+            if event_stream:
+                event_stream.emit("job_status", {
+                    "status": "completed",
+                    "tickers_completed": completed_count,
+                    "tickers_total": len(tickers),
+                })
         else:
             job.status = "cancelled"
             job.completed_at = utc_now()
             job.error_message = "Cancelled by user"
             db.commit()
             logger.info("Job %s cancelled by user", job_id)
+            if event_stream:
+                event_stream.emit("job_status", {
+                    "status": "cancelled",
+                    "tickers_completed": completed_count,
+                    "tickers_total": len(tickers),
+                })
 
     # ------------------------------------------------------------------
     # Report storage

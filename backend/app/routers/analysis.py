@@ -5,13 +5,16 @@ GET    /api/analysis/jobs            -> list all analysis jobs (paginated)
 GET    /api/analysis/jobs/:id        -> get job status and results
 POST   /api/analysis/cancel/:job_id  -> cancel a running analysis job
 GET    /api/analysis/latest          -> get the latest completed analysis
+GET    /api/analysis/jobs/:id/stream -> SSE stream for live progress
 """
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -39,6 +42,7 @@ from app.schemas.portfolio import (
 from app.schemas.recommendation import RecommendationResponse
 from app.schemas.suggestion import StockSuggestionResponse
 from app.services.analysis_runner import get_runner
+from app.services.event_stream import get_event_stream
 from app.utils import utc_now
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
@@ -260,6 +264,73 @@ def cancel_job(
         db.commit()
 
     return {"status": "cancellation_requested", "job_id": job_id}
+
+
+@router.get("/jobs/{job_id}/stream")
+async def stream_analysis(job_id: str) -> StreamingResponse:
+    """SSE endpoint for live analysis progress.
+
+    This endpoint does NOT require API-key auth because SSE connections
+    (EventSource) cannot easily pass custom headers.  The job_id itself
+    acts as an unguessable token (UUID4).
+
+    The client receives events in standard SSE format::
+
+        id: 0
+        event: stage_start
+        data: {"team":"Analyst Team","agent":"Market Analyst","ticker":"AAPL"}
+
+    The stream ends with a ``done`` event once the job completes.
+    Clients can reconnect and pass ``Last-Event-ID`` to resume from
+    where they left off (though this simple implementation uses the
+    query-string ``last_id`` parameter instead).
+    """
+    stream = get_event_stream(job_id)
+    if not stream:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": {
+                    "code": "NO_STREAM",
+                    "message": f"No active event stream for job '{job_id}'",
+                }
+            },
+        )
+
+    async def event_generator():
+        last_id = -1
+        while True:
+            for event in stream.subscribe(last_id):
+                last_id = event["id"]
+                yield f"id: {event['id']}\n"
+                yield f"event: {event['type']}\n"
+                yield f"data: {json.dumps(event['data'])}\n\n"
+
+            if stream.is_complete:
+                # Drain any remaining events that arrived between the
+                # last subscribe() call and mark_complete().
+                for event in stream.subscribe(last_id):
+                    last_id = event["id"]
+                    yield f"id: {event['id']}\n"
+                    yield f"event: {event['type']}\n"
+                    yield f"data: {json.dumps(event['data'])}\n\n"
+                yield f"event: done\ndata: {{}}\n\n"
+                break
+
+            # Yield a keep-alive comment every cycle to detect broken
+            # connections and avoid proxy timeouts.
+            yield ": keepalive\n\n"
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
+    )
 
 
 @router.get("/jobs/{job_id}", response_model=AnalysisJobResponse)
