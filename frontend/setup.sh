@@ -1,27 +1,56 @@
 #!/bin/bash
 set -e
 
-echo "=== Portfolio Agents Frontend Setup ==="
+echo ""
+echo "  ╔══════════════════════════════════════╗"
+echo "  ║   Portfolio Agents Frontend Setup    ║"
+echo "  ╚══════════════════════════════════════╝"
 echo ""
 
 cd "$(dirname "$0")"
 
-# Install dependencies
 echo "Installing dependencies..."
 npm install
 
-# Create .env if missing
-if [ ! -f ".env" ]; then
-    cat > .env << 'EOF'
-VITE_API_BASE_URL=http://localhost:8000
-VITE_API_KEY=dev-api-key-change-me
-VITE_USE_MOCKS=false
-EOF
-    echo "Created .env — set VITE_API_KEY to match your backend API_KEY"
-else
-    echo ".env already configured."
+if [ -f ".env" ]; then
+    read -p "An .env file already exists. Reconfigure? [y/N]: " reconfigure
+    if [[ ! "$reconfigure" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "✓ Setup complete. Run: ./start.sh"
+        exit 0
+    fi
 fi
 
 echo ""
-echo "=== Setup complete ==="
-echo "Run: ./start.sh"
+echo "─── Frontend Configuration ───"
+echo ""
+
+read -p "Backend URL [http://localhost:8000]: " api_url
+api_url=${api_url:-http://localhost:8000}
+
+read -p "API Key (must match backend API_KEY): " api_key
+api_key=${api_key:-dev-api-key-change-me}
+
+read -p "Use mock data instead of real backend? [y/N]: " use_mocks
+if [[ "$use_mocks" =~ ^[Yy]$ ]]; then
+    mocks="true"
+else
+    mocks="false"
+fi
+
+cat > .env << EOF
+VITE_API_BASE_URL=$api_url
+VITE_API_KEY=$api_key
+VITE_USE_MOCKS=$mocks
+EOF
+
+echo ""
+echo "✓ Configuration saved to .env"
+echo ""
+echo "  ╔══════════════════════════════════════╗"
+echo "  ║         Setup Complete!              ║"
+echo "  ╠══════════════════════════════════════╣"
+echo "  ║  Run: ./start.sh                    ║"
+echo "  ║  URL: http://localhost:5173         ║"
+echo "  ╚══════════════════════════════════════╝"
+echo ""
