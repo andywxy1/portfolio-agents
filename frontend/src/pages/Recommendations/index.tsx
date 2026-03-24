@@ -1,0 +1,204 @@
+import { useState } from 'react';
+import { useRecommendations, useUpdateRecommendation, useSuggestions } from '../../api/hooks';
+import { LoadingSpinner } from '../../components/LoadingSpinner';
+import { EmptyState } from '../../components/EmptyState';
+import { RecommendationStatusBadge, SideBadge } from '../../components/StatusBadge';
+import {
+  formatCurrency,
+  formatPercent,
+  formatDate,
+  formatCompactCurrency,
+} from '../../utils/format';
+import type { StockSuggestion } from '../../types';
+
+const STATUS_FILTERS: { label: string; value: string | undefined }[] = [
+  { label: 'All', value: undefined },
+  { label: 'Pending', value: 'pending' },
+  { label: 'Accepted', value: 'accepted' },
+  { label: 'Dismissed', value: 'dismissed' },
+  { label: 'Expired', value: 'expired' },
+];
+
+export default function Recommendations() {
+  const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
+  const { data: recsData, isLoading: recsLoading } = useRecommendations(
+    statusFilter ? { status: statusFilter } : undefined
+  );
+  const { data: suggestions, isLoading: sugLoading } = useSuggestions();
+  const updateMutation = useUpdateRecommendation();
+
+  if (recsLoading || sugLoading) return <LoadingSpinner label="Loading recommendations..." />;
+
+  const recommendations = recsData?.data ?? [];
+
+  return (
+    <div className="space-y-8">
+      {/* Header */}
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Recommendations</h1>
+        <p className="mt-1 text-sm text-gray-500">AI-generated order suggestions and new stock ideas</p>
+      </div>
+
+      {/* Active Recommendations */}
+      <section>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">Order Recommendations</h2>
+          <div className="flex gap-1">
+            {STATUS_FILTERS.map(f => (
+              <button
+                key={f.label}
+                onClick={() => setStatusFilter(f.value)}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statusFilter === f.value
+                    ? 'bg-slate-900 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {recommendations.length === 0 ? (
+          <EmptyState title="No recommendations" description="Run an analysis to generate recommendations." />
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Ticker</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Side</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Type</th>
+                  <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Qty</th>
+                  <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Price</th>
+                  <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Confidence</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Expiry</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {recommendations.map(rec => (
+                  <tr key={rec.id} className="hover:bg-gray-50 transition-colors">
+                    <td className="px-4 py-3 text-sm font-semibold text-gray-900">{rec.ticker}</td>
+                    <td className="px-4 py-3"><SideBadge side={rec.side} /></td>
+                    <td className="px-4 py-3 text-sm text-gray-600 capitalize">{rec.order_type.replace('_', ' ')}</td>
+                    <td className="px-4 py-3 text-sm text-right tabular-nums">{rec.quantity}</td>
+                    <td className="px-4 py-3 text-sm text-right tabular-nums">
+                      {rec.limit_price ? formatCurrency(rec.limit_price) : rec.stop_price ? formatCurrency(rec.stop_price) : '--'}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-right tabular-nums">
+                      {rec.confidence != null ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <div className="h-1.5 w-16 rounded-full bg-gray-200 overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-emerald-500"
+                              style={{ width: `${rec.confidence * 100}%` }}
+                            />
+                          </div>
+                          <span className="text-xs text-gray-500">{formatPercent(rec.confidence)}</span>
+                        </span>
+                      ) : '--'}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-600">{formatDate(rec.expiration)}</td>
+                    <td className="px-4 py-3"><RecommendationStatusBadge status={rec.status} /></td>
+                    <td className="px-4 py-3">
+                      {rec.status === 'pending' && (
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => updateMutation.mutate({ id: rec.id, data: { status: 'accepted' } })}
+                            disabled={updateMutation.isPending}
+                            className="rounded px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                          >
+                            Accept
+                          </button>
+                          <button
+                            onClick={() => updateMutation.mutate({ id: rec.id, data: { status: 'dismissed' } })}
+                            disabled={updateMutation.isPending}
+                            className="rounded px-2 py-1 text-xs font-medium text-gray-500 hover:bg-gray-100 disabled:opacity-50"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {/* Rationale expandable rows */}
+            <div className="divide-y divide-gray-100 border-t border-gray-200">
+              {recommendations.map(rec => (
+                <details key={`rationale-${rec.id}`} className="group">
+                  <summary className="flex cursor-pointer items-center gap-2 px-4 py-2 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-50">
+                    <svg className="h-3 w-3 transition-transform group-open:rotate-90" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" />
+                    </svg>
+                    {rec.ticker} rationale
+                    {rec.tags && rec.tags.length > 0 && (
+                      <span className="flex gap-1 ml-2">
+                        {rec.tags.map(tag => (
+                          <span key={tag} className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">{tag}</span>
+                        ))}
+                      </span>
+                    )}
+                  </summary>
+                  <p className="px-4 pb-3 pt-1 text-sm text-gray-600">{rec.rationale}</p>
+                </details>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* New Stock Suggestions */}
+      <section>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">New Stock Suggestions</h2>
+        {!suggestions || suggestions.length === 0 ? (
+          <EmptyState title="No suggestions" description="Suggestions are generated during analysis." />
+        ) : (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {suggestions.map(s => (
+              <SuggestionCard key={s.id} suggestion={s} />
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function SuggestionCard({ suggestion: s }: { suggestion: StockSuggestion }) {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-5 space-y-3 hover:shadow-md transition-shadow">
+      <div className="flex items-start justify-between">
+        <div>
+          <h3 className="text-sm font-bold text-gray-900">{s.ticker}</h3>
+          <p className="text-xs text-gray-500">{s.company_name}</p>
+        </div>
+        <span className="rounded bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700 capitalize">
+          {s.gap_type.replace('_', ' ')}
+        </span>
+      </div>
+
+      <div className="flex gap-4 text-xs text-gray-500">
+        <span>{s.sector}</span>
+        {s.current_price && <span>{formatCurrency(s.current_price)}</span>}
+        {s.market_cap && <span>Mkt Cap {formatCompactCurrency(s.market_cap)}</span>}
+      </div>
+
+      <p className="text-sm text-gray-600 line-clamp-3">{s.rationale}</p>
+
+      <div className="flex gap-4 text-xs text-gray-500">
+        {s.pe_ratio && <span>P/E {s.pe_ratio.toFixed(1)}</span>}
+        {s.dividend_yield != null && s.dividend_yield > 0 && <span>Div {formatPercent(s.dividend_yield)}</span>}
+        {s.suggested_weight && <span>Suggested {formatPercent(s.suggested_weight)}</span>}
+      </div>
+
+      <button className="w-full rounded-lg border border-gray-200 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+        Watch
+      </button>
+    </div>
+  );
+}
