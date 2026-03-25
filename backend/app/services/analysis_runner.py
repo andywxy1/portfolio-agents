@@ -161,6 +161,9 @@ class AnalysisRunner:
         # Compute weights using current prices where available
         weight_map, current_prices = _compute_weight_map_with_prices(db, holdings)
 
+        # Build per-ticker portfolio context for position-aware analysis
+        portfolio_context_map = _build_portfolio_context_map(holdings, current_prices, weight_map)
+
         # Build per-ticker depth map based on depth_setting
         ticker_depth_map: dict[str, str] = {}
         for ticker in tickers:
@@ -246,11 +249,14 @@ class AnalysisRunner:
                 thread_db.commit()
 
                 # Run analysis via the tiered adapter (blocking).
+                # Pass portfolio context so agents know the user's position.
+                ticker_portfolio_ctx = portfolio_context_map.get(ticker.upper())
                 result = self._adapter.analyze_ticker_streaming(
                     ticker,
                     depth,
                     event_stream=event_stream,
                     cancel_check=lambda: self._is_cancelled(job_id),
+                    portfolio_context=ticker_portfolio_ctx,
                 )
 
                 elapsed = round(time.monotonic() - ticker_start, 1)
@@ -723,13 +729,39 @@ class AnalysisRunner:
         hhi = concentration.get("hhi", 0)
         num_sectors = len(sector_breakdown)
 
+        # Build per-position P&L summary lines
+        pnl_lines: list[str] = []
+        for a in allocation:
+            t = a.get("ticker", "?")
+            bp = a.get("buy_price")
+            cp = a.get("current_price")
+            p = a.get("pnl")
+            pp = a.get("pnl_pct")
+            if bp is not None and p is not None and pp is not None:
+                pnl_lines.append(
+                    f"  {t}: bought ${bp:.2f}, now ${cp:.2f}, "
+                    f"P&L ${p:+,.2f} ({pp:+.1%})"
+                )
+
+        pnl_detail = ""
+        if pnl_lines:
+            pnl_detail = "\n\nPer-position P&L:\n" + "\n".join(pnl_lines)
+
+        total_pnl_str = ""
+        if total_pnl is not None and total_pnl_pct is not None:
+            total_pnl_str = (
+                f" Total portfolio P&L: ${total_pnl:+,.2f} ({total_pnl_pct:+.1%})."
+            )
+
         summary = (
             f"Portfolio analysis complete for {len(tickers)} positions. "
             f"Signals: {buy_count} buy/overweight, {hold_count} hold, "
             f"{sell_count} sell/underweight"
             + (f", {error_count} failed" if error_count else "")
-            + f". Portfolio HHI concentration index is {hhi:.0f} "
+            + f".{total_pnl_str}"
+            + f" Portfolio HHI concentration index is {hhi:.0f} "
             f"({'concentrated' if hhi > 2500 else 'moderately diversified' if hhi > 1500 else 'well diversified'})."
+            + pnl_detail
         )
 
         sorted_w = sorted(
@@ -967,6 +999,49 @@ def _compute_weight_map_with_prices(
 
     weight_map = {ticker: val / total for ticker, val in position_values.items()}
     return weight_map, current_prices
+
+
+def _build_portfolio_context_map(
+    holdings: list[Holding],
+    current_prices: dict[str, float],
+    weight_map: dict[str, float],
+) -> dict[str, dict[str, Any]]:
+    """Build per-ticker portfolio context dicts for position-aware analysis.
+
+    Returns a dict mapping uppercase ticker -> context dict with keys:
+    shares, buy_price, current_price, pnl, pnl_pct, weight, total_value.
+    """
+    # Compute total portfolio value
+    total_value = 0.0
+    for h in holdings:
+        price = current_prices.get(h.ticker.upper(), h.buy_price)
+        total_value += h.shares * price
+
+    context_map: dict[str, dict[str, Any]] = {}
+    for h in holdings:
+        ticker_upper = h.ticker.upper()
+        price = current_prices.get(ticker_upper)
+        cost_basis = h.shares * h.buy_price
+
+        if price is not None:
+            market_value = h.shares * price
+            pnl = market_value - cost_basis
+            pnl_pct = pnl / cost_basis if cost_basis > 0 else None
+        else:
+            pnl = None
+            pnl_pct = None
+
+        context_map[ticker_upper] = {
+            "shares": h.shares,
+            "buy_price": h.buy_price,
+            "current_price": price,
+            "pnl": round(pnl, 2) if pnl is not None else None,
+            "pnl_pct": pnl_pct,
+            "weight": weight_map.get(h.ticker, 0.0),
+            "total_value": round(total_value, 2),
+        }
+
+    return context_map
 
 
 def _determine_depth(weight: float) -> str:

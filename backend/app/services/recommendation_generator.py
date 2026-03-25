@@ -148,6 +148,18 @@ Guidelines:
   for beneficial-but-not-urgent, "low" for opportunistic or nice-to-have.
 - If no trades are warranted, return an empty recommendations array.
 
+IMPORTANT portfolio context considerations:
+- The allocation table includes each position's buy price, cost basis,
+  unrealized P&L in dollars and percentage. Use this to inform your
+  recommendations.
+- For SELL recommendations on positions with large unrealized gains,
+  note the tax implications and consider partial sells.
+- For SELL recommendations on positions with large unrealized losses,
+  consider tax-loss harvesting opportunities.
+- For BUY recommendations on existing positions, consider the resulting
+  position concentration and whether the average cost basis is favorable.
+- Size recommendations appropriately relative to the total portfolio value.
+
 Call the ``submit_order_recommendations`` function with your recommendations.
 """
 
@@ -175,16 +187,20 @@ def _build_user_prompt(
         )
 
     parts.append("\n## Portfolio Allocation\n")
-    parts.append("| Ticker | Shares | Buy Price | Current Price | Weight | P&L % |")
-    parts.append("|--------|--------|-----------|---------------|--------|-------|")
+    parts.append("| Ticker | Shares | Buy Price | Current Price | Cost Basis | Market Value | P&L $ | P&L % | Weight |")
+    parts.append("|--------|--------|-----------|---------------|------------|--------------|-------|-------|--------|")
     for a in allocation:
+        pnl_str = f"${a['pnl']:+,.2f}" if a.get('pnl') is not None else "N/A"
         parts.append(
             f"| {a.get('ticker', '?')} "
             f"| {a.get('shares', '?')} "
-            f"| {a.get('buy_price', '?')} "
-            f"| {a.get('current_price', 'N/A')} "
-            f"| {_fmt_pct(a.get('weight'))} "
-            f"| {_fmt_pct(a.get('pnl_pct'))} |"
+            f"| ${a.get('buy_price', '?')} "
+            f"| {_fmt_price(a.get('current_price'))} "
+            f"| ${a.get('cost_basis', '?'):,.2f} "
+            f"| {_fmt_price(a.get('market_value'))} "
+            f"| {pnl_str} "
+            f"| {_fmt_pct(a.get('pnl_pct'))} "
+            f"| {_fmt_pct(a.get('weight'))} |"
         )
 
     parts.append("\n## Concentration Metrics\n")
@@ -212,6 +228,16 @@ def _fmt_pct(value: Any) -> str:
         return "N/A"
     try:
         return f"{float(value):.1%}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _fmt_price(value: Any) -> str:
+    """Format a float as a dollar amount, handling None."""
+    if value is None:
+        return "N/A"
+    try:
+        return f"${float(value):,.2f}"
     except (TypeError, ValueError):
         return str(value)
 

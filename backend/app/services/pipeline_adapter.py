@@ -338,6 +338,7 @@ class PipelineAdapter:
         self,
         ticker: str,
         trade_date: Optional[str] = None,
+        portfolio_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Full analysis: all 4 analysts + full debate rounds."""
         trade_date = trade_date or _today()
@@ -348,12 +349,14 @@ class PipelineAdapter:
             analysts=_ANALYSTS_HEAVY,
             max_debate_rounds=settings.max_debate_rounds,
             max_risk_discuss_rounds=settings.max_risk_discuss_rounds,
+            portfolio_context=portfolio_context,
         )
 
     def analyze_medium(
         self,
         ticker: str,
         trade_date: Optional[str] = None,
+        portfolio_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Reduced analysis: market + fundamentals, 1 debate round."""
         trade_date = trade_date or _today()
@@ -366,12 +369,14 @@ class PipelineAdapter:
             analysts=_ANALYSTS_MEDIUM,
             max_debate_rounds=1,
             max_risk_discuss_rounds=1,
+            portfolio_context=portfolio_context,
         )
 
     def analyze_light(
         self,
         ticker: str,
         trade_date: Optional[str] = None,
+        portfolio_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Minimal analysis: fundamentals only, no debate."""
         trade_date = trade_date or _today()
@@ -382,6 +387,7 @@ class PipelineAdapter:
             analysts=_ANALYSTS_LIGHT,
             max_debate_rounds=0,
             max_risk_discuss_rounds=0,
+            portfolio_context=portfolio_context,
         )
 
     # ------------------------------------------------------------------
@@ -393,6 +399,7 @@ class PipelineAdapter:
         ticker: str,
         depth: str = "full",
         trade_date: Optional[str] = None,
+        portfolio_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Dispatch to the appropriate tier method by depth label.
 
@@ -408,7 +415,7 @@ class PipelineAdapter:
             "light": self.analyze_light,
         }
         method = dispatch.get(depth, self.analyze_medium)
-        return method(ticker, trade_date)
+        return method(ticker, trade_date, portfolio_context=portfolio_context)
 
     # ------------------------------------------------------------------
     # Streaming variant (emits events to an AnalysisEventStream)
@@ -421,6 +428,7 @@ class PipelineAdapter:
         trade_date: Optional[str] = None,
         event_stream: Optional[AnalysisEventStream] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        portfolio_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Run analysis with live event streaming.
 
@@ -432,9 +440,13 @@ class PipelineAdapter:
             Optional callable that returns ``True`` when the job has been
             cancelled.  Checked between graph stream chunks so that
             long-running single-ticker analyses can be interrupted.
+        portfolio_context
+            Optional dict with portfolio position data (shares, buy_price,
+            current_price, pnl, pnl_pct, weight, total_value) to inject
+            into the analysis so agents consider the user's position.
         """
         if event_stream is None:
-            return self.analyze_ticker(ticker, depth, trade_date)
+            return self.analyze_ticker(ticker, depth, trade_date, portfolio_context=portfolio_context)
 
         trade_date = trade_date or _today()
 
@@ -459,6 +471,7 @@ class PipelineAdapter:
             max_risk_discuss_rounds=risk_rounds,
             event_stream=event_stream,
             cancel_check=cancel_check,
+            portfolio_context=portfolio_context,
         )
 
     # ------------------------------------------------------------------
@@ -475,6 +488,7 @@ class PipelineAdapter:
         max_risk_discuss_rounds: int,
         event_stream: AnalysisEventStream,
         cancel_check: Optional[Callable[[], bool]] = None,
+        portfolio_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Stream the LangGraph execution, emitting events for each node.
 
@@ -520,6 +534,15 @@ class PipelineAdapter:
 
             # Build initial state
             init_state = graph_obj.propagator.create_initial_state(ticker, trade_date)
+
+            # Inject portfolio context into initial messages so all agents
+            # in the pipeline are aware of the user's position details
+            if portfolio_context:
+                context_msg = _build_portfolio_context_message(ticker, portfolio_context)
+                if context_msg:
+                    existing_messages = init_state.get("messages", [])
+                    # Prepend context as a system message before the ticker message
+                    init_state["messages"] = [("system", context_msg)] + list(existing_messages)
 
             # Override stream_mode to "updates" so chunks are {node_name: delta}
             # Also pass callbacks into the runtime config for tool nodes
@@ -735,6 +758,7 @@ class PipelineAdapter:
         analysts: list[str],
         max_debate_rounds: int,
         max_risk_discuss_rounds: int,
+        portfolio_context: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Instantiate a fresh graph, run propagation, return structured results."""
         try:
@@ -750,6 +774,42 @@ class PipelineAdapter:
                 debug=False,
                 config=config,
             )
+
+            # If portfolio context is provided, we need to use the graph
+            # directly (instead of the convenience propagate() method) so
+            # we can inject context into the initial state messages.
+            if portfolio_context:
+                context_msg = _build_portfolio_context_message(ticker, portfolio_context)
+                if context_msg:
+                    init_state = graph.propagator.create_initial_state(ticker, trade_date)
+                    existing_messages = init_state.get("messages", [])
+                    init_state["messages"] = [("system", context_msg)] + list(existing_messages)
+
+                    stream_config = {
+                        "recursion_limit": config.get("max_recur_limit", 100),
+                    }
+                    # Run the graph and collect final state
+                    final_state = None
+                    for chunk in graph.graph.stream(
+                        init_state,
+                        stream_mode="values",
+                        config=stream_config,
+                    ):
+                        final_state = chunk
+
+                    if final_state is None:
+                        final_state = init_state
+
+                    decision = graph.process_signal(
+                        final_state.get("final_trade_decision", "")
+                    )
+                    result = _extract_result(final_state, decision)
+                    logger.info(
+                        "Analysis complete for %s: signal=%s",
+                        ticker,
+                        result["signal"],
+                    )
+                    return result
 
             final_state, decision = graph.propagate(ticker, trade_date)
 
@@ -768,6 +828,76 @@ class PipelineAdapter:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _build_portfolio_context_message(
+    ticker: str,
+    ctx: dict[str, Any],
+) -> str | None:
+    """Build a portfolio context string to prepend to the graph's initial messages.
+
+    This gives all agents in the TradingAgents pipeline awareness of the
+    user's actual position -- cost basis, unrealized P&L, portfolio weight,
+    and overall portfolio value -- so that recommendations are personalized
+    rather than generic.
+
+    Parameters
+    ----------
+    ticker
+        The ticker being analyzed.
+    ctx
+        Dict with keys: shares, buy_price, current_price, pnl, pnl_pct,
+        weight, total_value.  All values are optional; missing values are
+        omitted from the message.
+
+    Returns
+    -------
+    str or None
+        The context message, or None if no meaningful context is available.
+    """
+    shares = ctx.get("shares")
+    buy_price = ctx.get("buy_price")
+    if shares is None and buy_price is None:
+        return None
+
+    parts = [f"PORTFOLIO CONTEXT for {ticker}:"]
+
+    if shares is not None and buy_price is not None:
+        parts.append(
+            f"- Position: {shares} shares at cost basis ${buy_price:.2f}/share"
+        )
+        cost_basis = shares * buy_price
+        parts.append(f"- Total cost basis: ${cost_basis:.2f}")
+
+    current_price = ctx.get("current_price")
+    if current_price is not None:
+        parts.append(f"- Current price: ${current_price:.2f}")
+
+    pnl = ctx.get("pnl")
+    pnl_pct = ctx.get("pnl_pct")
+    if pnl is not None and pnl_pct is not None:
+        parts.append(f"- Unrealized P&L: ${pnl:.2f} ({pnl_pct:.1%})")
+    elif pnl is not None:
+        parts.append(f"- Unrealized P&L: ${pnl:.2f}")
+
+    weight = ctx.get("weight")
+    if weight is not None:
+        parts.append(f"- Position weight in portfolio: {weight:.1%}")
+
+    total_value = ctx.get("total_value")
+    if total_value is not None:
+        parts.append(f"- Portfolio total value: ${total_value:.2f}")
+
+    parts.append("")
+    parts.append("Consider this context when making your recommendation.")
+    parts.append(
+        "A BUY recommendation should consider the existing position size."
+    )
+    parts.append(
+        "A SELL recommendation should note the unrealized gain/loss implications."
+    )
+
+    return "\n".join(parts)
 
 
 def _today() -> str:

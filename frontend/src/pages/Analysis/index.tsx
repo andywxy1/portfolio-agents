@@ -7,7 +7,92 @@ import { SignalBadge, JobStatusBadge } from '../../components/StatusBadge';
 import { useToast } from '../../components/Toast';
 import { usePageTitle } from '../../hooks/usePageTitle';
 import { formatCurrency, formatPnlPercent, pnlColor, formatRelativeTime } from '../../utils/format';
+import { renderMarkdown, parseReport } from '../../utils/markdown';
 import type { PositionAnalysis } from '../../types';
+
+// ---------------------------------------------------------------------------
+// Tab definitions for report sections
+// ---------------------------------------------------------------------------
+
+interface ReportTab {
+  key: string;
+  label: string;
+  icon: string;
+}
+
+const REPORT_TABS: ReportTab[] = [
+  { key: 'trade_decision', label: 'Final Decision', icon: 'verdict' },
+  { key: 'market_report', label: 'Market Analysis', icon: 'market' },
+  { key: 'sentiment_report', label: 'Sentiment', icon: 'sentiment' },
+  { key: 'news_report', label: 'News', icon: 'news' },
+  { key: 'fundamentals_report', label: 'Fundamentals', icon: 'fundamentals' },
+  { key: 'investment_debate', label: 'Investment Debate', icon: 'debate' },
+  { key: 'risk_debate', label: 'Risk Assessment', icon: 'risk' },
+  { key: 'investment_plan', label: 'Investment Plan', icon: 'plan' },
+];
+
+// ---------------------------------------------------------------------------
+// Tab icon component
+// ---------------------------------------------------------------------------
+
+function TabIcon({ icon }: { icon: string }) {
+  switch (icon) {
+    case 'verdict':
+      return (
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      );
+    case 'market':
+      return (
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+        </svg>
+      );
+    case 'sentiment':
+      return (
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15.182 15.182a4.5 4.5 0 01-6.364 0M21 12a9 9 0 11-18 0 9 9 0 0118 0zM9.75 9.75c0 .414-.168.75-.375.75S9 10.164 9 9.75 9.168 9 9.375 9s.375.336.375.75zm-.375 0h.008v.015h-.008V9.75zm5.625 0c0 .414-.168.75-.375.75s-.375-.336-.375-.75.168-.75.375-.75.375.336.375.75zm-.375 0h.008v.015h-.008V9.75z" />
+        </svg>
+      );
+    case 'news':
+      return (
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 7.5h1.5m-1.5 3h1.5m-7.5 3h7.5m-7.5 3h7.5m3-9h3.375c.621 0 1.125.504 1.125 1.125V18a2.25 2.25 0 01-2.25 2.25M16.5 7.5V18a2.25 2.25 0 002.25 2.25M16.5 7.5V4.875c0-.621-.504-1.125-1.125-1.125H4.125C3.504 3.75 3 4.254 3 4.875V18a2.25 2.25 0 002.25 2.25h13.5M6 7.5h3v3H6v-3z" />
+        </svg>
+      );
+    case 'fundamentals':
+      return (
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+        </svg>
+      );
+    case 'debate':
+      return (
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
+        </svg>
+      );
+    case 'risk':
+      return (
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+        </svg>
+      );
+    case 'plan':
+      return (
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15a2.25 2.25 0 012.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main page component
+// ---------------------------------------------------------------------------
 
 export default function Analysis() {
   usePageTitle('Analysis');
@@ -32,7 +117,7 @@ export default function Analysis() {
     );
   }, [analysisMutation, navigate, toast]);
 
-  // Loading skeleton (Item 8)
+  // Loading skeleton
   if (isLoading) {
     return (
       <div className="flex h-[calc(100vh-3rem)] gap-6">
@@ -51,7 +136,7 @@ export default function Analysis() {
     );
   }
 
-  // Error state (Item 9)
+  // Error state
   if (error) {
     return (
       <div className="space-y-6">
@@ -66,7 +151,7 @@ export default function Analysis() {
   // Defensive: ensure analyses is always an array
   const analysesList = Array.isArray(analyses) ? analyses : [];
 
-  // Empty state (Item 14)
+  // Empty state
   if (analysesList.length === 0) {
     return (
       <div className="space-y-6">
@@ -121,6 +206,37 @@ export default function Analysis() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Helper: get renderable markdown content for a report tab key
+// ---------------------------------------------------------------------------
+
+function getReportContent(analysis: PositionAnalysis, key: string): string {
+  switch (key) {
+    case 'trade_decision':
+      return parseReport(analysis.raw_decision);
+    case 'market_report':
+      return parseReport(analysis.market_report);
+    case 'sentiment_report':
+      return parseReport(analysis.sentiment_report);
+    case 'news_report':
+      return parseReport(analysis.news_report);
+    case 'fundamentals_report':
+      return parseReport(analysis.fundamentals_report);
+    case 'investment_debate':
+      return parseReport(analysis.investment_debate);
+    case 'risk_debate':
+      return parseReport(analysis.risk_debate);
+    case 'investment_plan':
+      return parseReport(analysis.investment_plan);
+    default:
+      return '';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Detail panel with tabbed reports
+// ---------------------------------------------------------------------------
+
 function AnalysisDetail({
   analysis,
   onReanalyze,
@@ -130,6 +246,20 @@ function AnalysisDetail({
   onReanalyze: (ticker: string) => void;
   isReanalyzing: boolean;
 }) {
+  const [activeTab, setActiveTab] = useState<string>('trade_decision');
+
+  const availableTabs = REPORT_TABS.filter(tab => {
+    const content = getReportContent(analysis, tab.key);
+    return content.trim().length > 0;
+  });
+
+  // If current active tab has no content, fall back to first available
+  const resolvedTab = availableTabs.find(t => t.key === activeTab)
+    ? activeTab
+    : (availableTabs[0]?.key ?? 'trade_decision');
+
+  const currentContent = getReportContent(analysis, resolvedTab);
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -169,155 +299,55 @@ function AnalysisDetail({
         )}
       </div>
 
-      {/* Raw Decision */}
-      {analysis.raw_decision && (
-        <CollapsibleSection title="Final Decision" defaultOpen>
-          <p className="text-sm text-gray-700 whitespace-pre-wrap">{analysis.raw_decision}</p>
-        </CollapsibleSection>
-      )}
-
-      {/* Investment Debate */}
-      {analysis.investment_debate && (
-        <CollapsibleSection title="Investment Debate" defaultOpen>
-          <div className="space-y-4">
-            <div>
-              <h4 className="text-xs font-semibold text-emerald-700 uppercase tracking-wide mb-1">Bull Case</h4>
-              <p className="text-sm text-gray-700">{analysis.investment_debate.bull_case}</p>
-            </div>
-            <div>
-              <h4 className="text-xs font-semibold text-red-700 uppercase tracking-wide mb-1">Bear Case</h4>
-              <p className="text-sm text-gray-700">{analysis.investment_debate.bear_case}</p>
-            </div>
-            <div>
-              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide mb-1">Judge Decision</h4>
-              <p className="text-sm text-gray-700">{analysis.investment_debate.judge_decision}</p>
-            </div>
+      {/* Report tabs and content */}
+      {availableTabs.length > 0 ? (
+        <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+          {/* Tab bar */}
+          <div className="border-b border-gray-200 bg-gray-50/50">
+            <nav className="flex overflow-x-auto" aria-label="Report sections">
+              {availableTabs.map(tab => {
+                const isActive = tab.key === resolvedTab;
+                return (
+                  <button
+                    key={tab.key}
+                    onClick={() => setActiveTab(tab.key)}
+                    className={`flex items-center gap-1.5 whitespace-nowrap px-4 py-3 text-xs font-medium border-b-2 transition-colors ${
+                      isActive
+                        ? 'border-indigo-500 text-indigo-700 bg-white'
+                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    }`}
+                    aria-selected={isActive}
+                    role="tab"
+                  >
+                    <TabIcon icon={tab.icon} />
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </nav>
           </div>
-        </CollapsibleSection>
-      )}
 
-      {/* Risk Assessment */}
-      {analysis.risk_debate && (
-        <CollapsibleSection title="Risk Assessment">
-          <div className="space-y-4">
-            <div>
-              <h4 className="text-xs font-semibold text-orange-700 uppercase tracking-wide mb-1">Aggressive View</h4>
-              <p className="text-sm text-gray-700">{analysis.risk_debate.aggressive_view}</p>
-            </div>
-            <div>
-              <h4 className="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-1">Conservative View</h4>
-              <p className="text-sm text-gray-700">{analysis.risk_debate.conservative_view}</p>
-            </div>
-            <div>
-              <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide mb-1">Neutral View</h4>
-              <p className="text-sm text-gray-700">{analysis.risk_debate.neutral_view}</p>
-            </div>
-            <div>
-              <h4 className="text-xs font-semibold text-purple-700 uppercase tracking-wide mb-1">Judge Decision</h4>
-              <p className="text-sm text-gray-700">{analysis.risk_debate.judge_decision}</p>
-            </div>
-          </div>
-        </CollapsibleSection>
-      )}
-
-      {/* Market Report */}
-      {analysis.market_report && (
-        <CollapsibleSection title="Market Report">
-          <ReportContent data={analysis.market_report} />
-        </CollapsibleSection>
-      )}
-
-      {/* Sentiment Report */}
-      {analysis.sentiment_report && (
-        <CollapsibleSection title="Sentiment Report">
-          <ReportContent data={analysis.sentiment_report} />
-        </CollapsibleSection>
-      )}
-
-      {/* News Report */}
-      {analysis.news_report && (
-        <CollapsibleSection title="News Report">
-          <ReportContent data={analysis.news_report} />
-        </CollapsibleSection>
-      )}
-
-      {/* Fundamentals Report */}
-      {analysis.fundamentals_report && (
-        <CollapsibleSection title="Fundamentals Report">
-          <ReportContent data={analysis.fundamentals_report} />
-        </CollapsibleSection>
-      )}
-
-      {/* Investment Plan */}
-      {analysis.investment_plan && (
-        <CollapsibleSection title="Investment Plan">
-          <ReportContent data={analysis.investment_plan} />
-        </CollapsibleSection>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Collapsible Section
-// ---------------------------------------------------------------------------
-
-function CollapsibleSection({
-  title,
-  defaultOpen = false,
-  children,
-}: {
-  title: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex w-full items-center justify-between px-6 py-4 text-left hover:bg-gray-50 transition-colors"
-      >
-        <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
-        <svg
-          className={`h-4 w-4 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`}
-          viewBox="0 0 20 20"
-          fill="currentColor"
-        >
-          <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
-        </svg>
-      </button>
-      {open && <div className="border-t border-gray-100 px-6 py-4">{children}</div>}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Report Content renderer (for generic JSON report data)
-// ---------------------------------------------------------------------------
-
-function ReportContent({ data }: { data: Record<string, unknown> }) {
-  return (
-    <div className="space-y-3">
-      {Object.entries(data).map(([key, value]) => (
-        <div key={key}>
-          <p className="text-xs font-medium text-gray-500 capitalize">{key.replace(/_/g, ' ')}</p>
-          <div className="mt-0.5 text-sm text-gray-700">
-            {typeof value === 'string' ? (
-              <p className="whitespace-pre-wrap">{value}</p>
-            ) : Array.isArray(value) ? (
-              <ul className="list-disc list-inside space-y-0.5">
-                {value.map((item, i) => (
-                  <li key={i}>{String(item)}</li>
-                ))}
-              </ul>
+          {/* Tab content */}
+          <div className="px-6 py-5">
+            {currentContent ? (
+              <div
+                className="prose prose-sm max-w-none text-gray-700"
+                dangerouslySetInnerHTML={{ __html: renderMarkdown(currentContent, 'light') }}
+              />
             ) : (
-              <p className="font-mono text-xs">{JSON.stringify(value, null, 2)}</p>
+              <p className="text-sm text-gray-400 text-center py-8">
+                No content available for this section.
+              </p>
             )}
           </div>
         </div>
-      ))}
+      ) : (
+        <div className="rounded-xl border border-gray-200 bg-white p-8 text-center">
+          <p className="text-sm text-gray-500">
+            No report data available yet. Reports will appear once the analysis completes.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
