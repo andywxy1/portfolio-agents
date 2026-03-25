@@ -259,16 +259,27 @@ def cancel_job(
             },
         )
 
-    # Set cancellation flag in the runner
+    # 1. Mark job as cancelled in DB immediately so frontend sees it
+    job.status = "cancelled"
+    job.completed_at = utc_now()
+    job.error_message = "Cancelled by user"
+    db.commit()
+
+    # 2. Signal the runner (sets threading.Event visible to all worker threads)
     get_runner().cancel_job(job_id)
 
-    # Also update DB status directly for pending jobs that haven't started
-    if job.status == "pending":
-        job.status = "cancelled"
-        job.completed_at = utc_now()
-        db.commit()
+    # 3. Emit cancellation SSE event immediately so frontend updates without
+    #    waiting for the background threads to notice the cancellation
+    stream = get_event_stream(job_id)
+    if stream:
+        stream.emit("job_status", {
+            "status": "cancelled",
+            "tickers_completed": job.completed_tickers,
+            "tickers_total": job.total_tickers,
+        })
+        stream.mark_complete()
 
-    return {"status": "cancellation_requested", "job_id": job_id}
+    return {"status": "cancelled", "job_id": job_id}
 
 
 @router.get("/jobs/{job_id}/stream")

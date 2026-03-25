@@ -45,16 +45,22 @@ class _StreamingCallbackHandler(BaseCallbackHandler):
     parameter) and to the graph runtime config (for tool nodes).  This
     provides live updates even when the graph stream itself only fires
     once per completed node.
+
+    Also checks for cancellation at LLM boundaries (start/end) so that
+    long-running LLM calls can be interrupted without waiting for the
+    next graph.stream() chunk.
     """
 
     def __init__(
         self,
         event_stream: AnalysisEventStream,
         ticker: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> None:
         super().__init__()
         self.stream = event_stream
         self.ticker = ticker
+        self.cancel_check = cancel_check
         # Track current agent for context (set externally by the streaming loop)
         self.current_agent: str = ""
 
@@ -63,6 +69,12 @@ class _StreamingCallbackHandler(BaseCallbackHandler):
     def on_llm_start(
         self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any
     ) -> None:
+        # Check for cancellation before the LLM call begins
+        if self.cancel_check and self.cancel_check():
+            raise AnalysisCancelledError(
+                f"Analysis of {self.ticker} cancelled by user (on_llm_start)"
+            )
+
         agent = self.current_agent or kwargs.get("name", "LLM")
         logger.debug("[callback] on_llm_start agent=%s", agent)
         self.stream.emit("agent_activity", {
@@ -72,6 +84,12 @@ class _StreamingCallbackHandler(BaseCallbackHandler):
         })
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        # Check for cancellation as soon as the LLM response arrives
+        if self.cancel_check and self.cancel_check():
+            raise AnalysisCancelledError(
+                f"Analysis of {self.ticker} cancelled by user (on_llm_end)"
+            )
+
         agent = self.current_agent or "LLM"
         # Extract text from the response
         text = ""
@@ -483,7 +501,10 @@ class PipelineAdapter:
             )
 
             # Create callback handler for fine-grained LLM/tool events
-            cb_handler = _StreamingCallbackHandler(event_stream, ticker)
+            # Pass cancel_check so the handler can abort at LLM boundaries
+            cb_handler = _StreamingCallbackHandler(
+                event_stream, ticker, cancel_check=cancel_check
+            )
 
             config = _build_graph_config(
                 max_debate_rounds=max_debate_rounds,
@@ -690,6 +711,10 @@ class PipelineAdapter:
                 result["signal"],
             )
             return result
+
+        except AnalysisCancelledError:
+            # Re-raise cancellation so the caller (analysis_runner) handles it
+            raise
 
         except Exception as exc:
             logger.exception(

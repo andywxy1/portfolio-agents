@@ -49,7 +49,7 @@ class AnalysisRunner:
     def __init__(self) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._adapter = PipelineAdapter()
-        self._cancelled: set[str] = set()
+        self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
     def submit_job(self, job_id: str, config: dict[str, Any] | None = None) -> None:
@@ -58,23 +58,35 @@ class AnalysisRunner:
         Creates an AnalysisEventStream for this job so that SSE clients
         can subscribe to live progress updates.
         """
+        with self._lock:
+            self._cancel_events[job_id] = threading.Event()
         create_event_stream(job_id)
         self._executor.submit(self._run_job, job_id, config or {})
 
     def cancel_job(self, job_id: str) -> None:
-        """Request cancellation of a running job."""
+        """Request cancellation of a running job.
+
+        Uses threading.Event.set() which is immediately visible to all
+        threads -- no lock acquisition needed for the check side.
+        """
         with self._lock:
-            self._cancelled.add(job_id)
+            event = self._cancel_events.get(job_id)
+        if event:
+            event.set()
 
     def _is_cancelled(self, job_id: str) -> bool:
-        """Check if a job has been cancelled."""
+        """Check if a job has been cancelled.
+
+        Uses threading.Event.is_set() which is lock-free and fast.
+        """
         with self._lock:
-            return job_id in self._cancelled
+            event = self._cancel_events.get(job_id)
+        return event.is_set() if event else False
 
     def _clear_cancelled(self, job_id: str) -> None:
-        """Remove the cancellation flag after the job ends."""
+        """Remove the cancellation event after the job ends."""
         with self._lock:
-            self._cancelled.discard(job_id)
+            self._cancel_events.pop(job_id, None)
 
     # ------------------------------------------------------------------
     # Job lifecycle
@@ -404,13 +416,25 @@ class AnalysisRunner:
                 futures[future] = ticker
 
             for future in as_completed(futures):
+                # Check cancellation before blocking on result -- break
+                # immediately so we don't wait for remaining futures
+                if self._is_cancelled(job_id):
+                    cancelled_detected = True
+                    # Cancel any futures that haven't started yet
+                    for f in futures:
+                        f.cancel()
+                    break
+
                 ticker = futures[future]
                 try:
                     summary = future.result()
                     position_summaries.append(summary)
                 except AnalysisCancelledError:
-                    # Cancellation: don't collect more results, let pool drain
+                    # Cancellation: cancel remaining futures and break
                     cancelled_detected = True
+                    for f in futures:
+                        f.cancel()
+                    break
                 except Exception:
                     logger.exception(
                         "Unexpected error collecting result for %s in job %s",
@@ -418,7 +442,9 @@ class AnalysisRunner:
                         job_id,
                     )
 
-        # If cancellation was detected, mark job cancelled and exit
+        # If cancellation was detected, ensure job is marked cancelled and exit.
+        # The cancel endpoint may have already updated the DB and emitted the
+        # SSE event, so we check before writing to avoid redundant updates.
         if cancelled_detected or self._is_cancelled(job_id):
             job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
             if job and job.status not in ("cancelled", "failed"):
@@ -426,7 +452,7 @@ class AnalysisRunner:
                 job.completed_at = utc_now()
                 job.error_message = "Cancelled by user"
                 db.commit()
-            if event_stream:
+            if event_stream and not event_stream.is_complete:
                 event_stream.emit("job_status", {
                     "status": "cancelled",
                     "tickers_completed": completed_count,
@@ -497,12 +523,14 @@ class AnalysisRunner:
                     "tickers_total": len(tickers),
                 })
         else:
-            job.status = "cancelled"
-            job.completed_at = utc_now()
-            job.error_message = "Cancelled by user"
-            db.commit()
+            # Cancel endpoint may have already marked the job; only update if needed
+            if job.status not in ("cancelled", "failed"):
+                job.status = "cancelled"
+                job.completed_at = utc_now()
+                job.error_message = "Cancelled by user"
+                db.commit()
             logger.info("Job %s cancelled by user", job_id)
-            if event_stream:
+            if event_stream and not event_stream.is_complete:
                 event_stream.emit("job_status", {
                     "status": "cancelled",
                     "tickers_completed": completed_count,
