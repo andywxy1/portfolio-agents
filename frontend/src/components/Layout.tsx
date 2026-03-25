@@ -1,13 +1,50 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Outlet, useLocation, Link } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { Sidebar } from './Sidebar';
 import { useActiveAnalysisJob } from '../hooks/useActiveAnalysis';
+
+// Fix #8: Breadcrumb label mapping
+const ROUTE_LABELS: Record<string, string> = {
+  '/': 'Dashboard',
+  '/holdings': 'Holdings',
+  '/analysis': 'Analysis Results',
+  '/recommendations': 'Recommendations',
+  '/history': 'History',
+  '/setup': 'Settings',
+};
+
+function getBreadcrumbLabel(pathname: string): string {
+  // Exact match first
+  if (ROUTE_LABELS[pathname]) return ROUTE_LABELS[pathname];
+  // Dynamic routes
+  if (pathname.startsWith('/analysis/progress/')) return 'Live Analysis';
+  // Fallback: capitalize last segment
+  const segments = pathname.split('/').filter(Boolean);
+  const last = segments[segments.length - 1] ?? '';
+  return last.charAt(0).toUpperCase() + last.slice(1);
+}
 
 export function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const activeJobId = useActiveAnalysisJob();
   const location = useLocation();
+
+  // Fix #9: Health check query - polls every 30s, shows banner on failure
+  const healthQuery = useQuery<{ status: string }>({
+    queryKey: ['health'],
+    queryFn: async () => {
+      const resp = await fetch('/api/health');
+      if (!resp.ok) throw new Error('Backend unreachable');
+      return resp.json();
+    },
+    refetchInterval: 30_000,
+    retry: false,
+    refetchOnWindowFocus: true,
+  });
+
+  const backendDown = healthQuery.isError;
 
   // Close mobile sidebar on navigation
   useEffect(() => {
@@ -30,6 +67,10 @@ export function Layout() {
   const closeSidebar = useCallback(() => {
     setSidebarOpen(false);
   }, []);
+
+  // Fix #8: Breadcrumb data
+  const currentLabel = getBreadcrumbLabel(location.pathname);
+  const isHome = location.pathname === '/';
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -72,6 +113,18 @@ export function Layout() {
           </div>
         </header>
 
+        {/* Fix #9: Backend-down banner */}
+        {backendDown && (
+          <div className="flex items-center gap-2 border-b border-red-200 bg-red-50 px-4 py-2">
+            <svg className="h-4 w-4 flex-shrink-0 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+            </svg>
+            <p className="text-sm font-medium text-red-800">
+              Cannot connect to server. Check that the backend is running.
+            </p>
+          </div>
+        )}
+
         {/* Active analysis banner */}
         {showAnalysisBanner && (
           <div className="flex items-center justify-between gap-3 border-b border-emerald-200 bg-emerald-50 px-4 py-2">
@@ -100,6 +153,25 @@ export function Layout() {
               </svg>
             </button>
           </div>
+        )}
+
+        {/* Fix #8: Breadcrumb bar */}
+        {!isHome && (
+          <nav className="border-b border-gray-200 bg-white px-4 py-2 text-sm" aria-label="Breadcrumb">
+            <ol className="flex items-center gap-1.5 text-gray-500">
+              <li>
+                <Link to="/" className="hover:text-gray-700 transition-colors">Dashboard</Link>
+              </li>
+              <li aria-hidden="true">
+                <svg className="h-3.5 w-3.5 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                </svg>
+              </li>
+              <li>
+                <span className="font-medium text-gray-900" aria-current="page">{currentLabel}</span>
+              </li>
+            </ol>
+          </nav>
         )}
 
         <main className="flex-1 overflow-y-auto bg-gray-50 p-4 sm:p-6">

@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import { usePositionAnalyses, useStartAnalysis } from '../../api/hooks';
 import { EmptyState } from '../../components/EmptyState';
 import { SkeletonReportPanel, Skeleton } from '../../components/Skeleton';
@@ -91,6 +91,81 @@ function TabIcon({ icon }: { icon: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// Scroll-fade sidebar wrapper (Fix #3)
+// ---------------------------------------------------------------------------
+
+function ScrollFadeSidebar({ children }: { children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [showBottomFade, setShowBottomFade] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const check = () => {
+      const hasMore = el.scrollHeight - el.scrollTop - el.clientHeight > 8;
+      setShowBottomFade(hasMore);
+    };
+    check();
+    el.addEventListener('scroll', check, { passive: true });
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener('scroll', check);
+      ro.disconnect();
+    };
+  }, []);
+
+  return (
+    <div className="relative flex-1 min-h-0">
+      <div ref={ref} className="absolute inset-0 overflow-y-auto space-y-1 pr-1">
+        {children}
+      </div>
+      {showBottomFade && (
+        <div className="pointer-events-none absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-gray-50 to-transparent" />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Render JSON objects as readable key-value pairs (Fix #7)
+// ---------------------------------------------------------------------------
+
+function renderJsonFallback(value: unknown): string {
+  if (!value || typeof value !== 'object') return String(value ?? '');
+  const obj = value as Record<string, unknown>;
+  const parts: string[] = [];
+  for (const [key, val] of Object.entries(obj)) {
+    const label = key
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+    if (val === null || val === undefined) continue;
+    if (typeof val === 'string') {
+      parts.push(`## ${label}\n\n${val}`);
+    } else if (typeof val === 'number' || typeof val === 'boolean') {
+      parts.push(`**${label}:** ${String(val)}`);
+    } else if (Array.isArray(val)) {
+      const items = val.map(v => typeof v === 'string' ? `- ${v}` : `- ${JSON.stringify(v)}`).join('\n');
+      parts.push(`## ${label}\n\n${items}`);
+    } else if (typeof val === 'object') {
+      // Nested object: render as sub-section key-value pairs
+      const subParts: string[] = [];
+      for (const [sk, sv] of Object.entries(val as Record<string, unknown>)) {
+        const subLabel = sk.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        if (sv === null || sv === undefined) continue;
+        if (typeof sv === 'string' || typeof sv === 'number' || typeof sv === 'boolean') {
+          subParts.push(`**${subLabel}:** ${String(sv)}`);
+        } else {
+          subParts.push(`**${subLabel}:** ${JSON.stringify(sv)}`);
+        }
+      }
+      parts.push(`## ${label}\n\n${subParts.join('\n\n')}`);
+    }
+  }
+  return parts.join('\n\n---\n\n');
+}
+
+// ---------------------------------------------------------------------------
 // Main page component
 // ---------------------------------------------------------------------------
 
@@ -101,6 +176,7 @@ export default function Analysis() {
   const { data: analyses, isLoading, error } = usePositionAnalyses();
   const analysisMutation = useStartAnalysis();
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const handleReanalyze = useCallback((ticker: string) => {
     analysisMutation.mutate(
@@ -120,7 +196,7 @@ export default function Analysis() {
   // Loading skeleton
   if (isLoading) {
     return (
-      <div className="flex h-[calc(100vh-3rem)] gap-6">
+      <div className="flex flex-1 min-h-0 overflow-hidden gap-6">
         <div className="w-64 flex-shrink-0 space-y-2">
           <Skeleton className="h-4 w-20 mb-3" />
           {Array.from({ length: 5 }).map((_, i) => (
@@ -151,7 +227,7 @@ export default function Analysis() {
   // Defensive: ensure analyses is always an array
   const analysesList = Array.isArray(analyses) ? analyses : [];
 
-  // Empty state
+  // Empty state (Fix #17)
   if (analysesList.length === 0) {
     return (
       <div className="space-y-6">
@@ -160,7 +236,7 @@ export default function Analysis() {
           <p className="mt-1 text-sm text-gray-500">AI-powered position analysis results</p>
         </div>
         <EmptyState
-          title="No analysis has been run yet"
+          title="Run an analysis from the Holdings page to see results here"
           description="Go to Holdings and click Run Analysis to get AI-powered insights on your positions."
           action={{ label: 'Go to Holdings', onClick: () => navigate('/holdings') }}
         />
@@ -168,69 +244,143 @@ export default function Analysis() {
     );
   }
 
+  // Filter by search (Fix #6)
+  const filteredAnalyses = searchQuery.trim()
+    ? analysesList.filter(a => a.ticker.toLowerCase().includes(searchQuery.toLowerCase()))
+    : analysesList;
+
   const selected = analysesList.find(a => a.ticker === selectedTicker) ?? analysesList[0];
 
   return (
-    <div className="flex h-[calc(100vh-3rem)] gap-6">
-      {/* Left sidebar - position list */}
-      <div className="w-64 flex-shrink-0 space-y-1 overflow-y-auto">
-        <h2 className="px-2 text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Positions</h2>
-        {analysesList.map(a => (
-          <button
-            key={a.ticker}
-            onClick={() => setSelectedTicker(a.ticker)}
-            className={`w-full flex items-center justify-between rounded-lg px-3 py-2.5 text-left transition-colors ${
-              selected.ticker === a.ticker
-                ? 'bg-white shadow-sm ring-1 ring-gray-200'
-                : 'hover:bg-white/60'
-            }`}
-          >
-            <div>
-              <p className="text-sm font-semibold text-gray-900">{a.ticker}</p>
-              <p className="text-xs text-gray-500">{formatCurrency(a.current_price)}</p>
-            </div>
-            {a.signal && <SignalBadge signal={a.signal} />}
-          </button>
-        ))}
+    <>
+      {/* Mobile position selector (Fix #2) */}
+      <div className="md:hidden mb-4">
+        <label htmlFor="mobile-position-select" className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
+          Select position
+        </label>
+        <select
+          id="mobile-position-select"
+          value={selected.ticker}
+          onChange={(e) => setSelectedTicker(e.target.value)}
+          className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm font-semibold text-gray-900 shadow-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+        >
+          {analysesList.map(a => (
+            <option key={a.ticker} value={a.ticker}>
+              {a.ticker} - {formatCurrency(a.current_price)} {a.signal ? `(${a.signal})` : ''}
+            </option>
+          ))}
+        </select>
       </div>
 
-      {/* Right panel - detail */}
-      <div className="flex-1 overflow-y-auto space-y-6">
-        <AnalysisDetail
-          analysis={selected}
-          onReanalyze={handleReanalyze}
-          isReanalyzing={analysisMutation.isPending}
-        />
+      {/* Fix #1: flex-1 min-h-0 overflow-hidden instead of h-[calc(100vh-3rem)] */}
+      <div className="flex flex-1 min-h-0 overflow-hidden gap-6">
+        {/* Left sidebar - position list (hidden on mobile, Fix #2) */}
+        <div className="hidden md:flex w-64 flex-shrink-0 flex-col min-h-0">
+          <h2 className="px-2 text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Positions</h2>
+
+          {/* Search input (Fix #6) */}
+          <div className="relative mb-2">
+            <svg className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <input
+              type="text"
+              placeholder="Filter by ticker..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-8 pr-3 text-xs text-gray-700 placeholder-gray-400 focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
+            />
+          </div>
+
+          {/* Scrollable list with fade indicator (Fix #3) */}
+          <ScrollFadeSidebar>
+            {filteredAnalyses.length === 0 ? (
+              <p className="px-2 py-4 text-xs text-gray-400 text-center">No positions match "{searchQuery}"</p>
+            ) : (
+              filteredAnalyses.map(a => (
+                <button
+                  key={a.ticker}
+                  onClick={() => setSelectedTicker(a.ticker)}
+                  className={`w-full flex items-center justify-between rounded-lg px-3 py-2.5 text-left transition-colors ${
+                    selected.ticker === a.ticker
+                      ? 'bg-white shadow-sm ring-1 ring-gray-200'
+                      : 'hover:bg-white/60'
+                  }`}
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">{a.ticker}</p>
+                    <p className="text-xs text-gray-500">{formatCurrency(a.current_price)}</p>
+                  </div>
+                  {a.signal && <SignalBadge signal={a.signal} />}
+                </button>
+              ))
+            )}
+          </ScrollFadeSidebar>
+        </div>
+
+        {/* Right panel - detail */}
+        <div className="flex-1 overflow-y-auto space-y-6">
+          <AnalysisDetail
+            analysis={selected}
+            onReanalyze={handleReanalyze}
+            isReanalyzing={analysisMutation.isPending}
+          />
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Helper: get renderable markdown content for a report tab key
+// Helper: get renderable markdown content for a report tab key (Fix #7)
 // ---------------------------------------------------------------------------
 
 function getReportContent(analysis: PositionAnalysis, key: string): string {
+  let raw: unknown;
   switch (key) {
     case 'trade_decision':
-      return parseReport(analysis.raw_decision);
+      raw = analysis.raw_decision;
+      break;
     case 'market_report':
-      return parseReport(analysis.market_report);
+      raw = analysis.market_report;
+      break;
     case 'sentiment_report':
-      return parseReport(analysis.sentiment_report);
+      raw = analysis.sentiment_report;
+      break;
     case 'news_report':
-      return parseReport(analysis.news_report);
+      raw = analysis.news_report;
+      break;
     case 'fundamentals_report':
-      return parseReport(analysis.fundamentals_report);
+      raw = analysis.fundamentals_report;
+      break;
     case 'investment_debate':
-      return parseReport(analysis.investment_debate);
+      raw = analysis.investment_debate;
+      break;
     case 'risk_debate':
-      return parseReport(analysis.risk_debate);
+      raw = analysis.risk_debate;
+      break;
     case 'investment_plan':
-      return parseReport(analysis.investment_plan);
+      raw = analysis.investment_plan;
+      break;
     default:
       return '';
   }
+
+  const parsed = parseReport(raw);
+
+  // Fix #7: If parseReport returned JSON.stringify output, render it better
+  if (parsed.startsWith('{') || parsed.startsWith('[')) {
+    try {
+      const obj = JSON.parse(parsed);
+      if (typeof obj === 'object' && obj !== null) {
+        return renderJsonFallback(obj);
+      }
+    } catch {
+      // not valid JSON, just return as-is
+    }
+  }
+
+  return parsed;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,21 +412,29 @@ function AnalysisDetail({
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center gap-4">
+      {/* Header (Fix #4 & #5: links to Recommendations and History) */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <h1 className="text-2xl font-bold text-gray-900">{analysis.ticker}</h1>
         {analysis.signal && <SignalBadge signal={analysis.signal} />}
         <JobStatusBadge status={analysis.status} />
         <span className="text-sm text-gray-500 capitalize">
           {analysis.analysis_depth} analysis
         </span>
-        <button
-          onClick={() => onReanalyze(analysis.ticker)}
-          disabled={isReanalyzing}
-          className="ml-auto rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
-        >
-          {isReanalyzing ? 'Starting...' : 'Re-analyze'}
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          <Link
+            to="/history"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+          >
+            View History
+          </Link>
+          <button
+            onClick={() => onReanalyze(analysis.ticker)}
+            disabled={isReanalyzing}
+            className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-colors"
+          >
+            {isReanalyzing ? 'Starting...' : 'Re-analyze'}
+          </button>
+        </div>
       </div>
 
       {/* Price info */}
@@ -348,6 +506,19 @@ function AnalysisDetail({
           </p>
         </div>
       )}
+
+      {/* Fix #4: Link to Recommendations */}
+      <div className="flex justify-end">
+        <Link
+          to="/recommendations"
+          className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-500 transition-colors"
+        >
+          View Recommendations
+          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+          </svg>
+        </Link>
+      </div>
     </div>
   );
 }

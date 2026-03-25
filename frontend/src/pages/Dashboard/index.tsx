@@ -175,7 +175,13 @@ export default function Dashboard() {
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={sectorData} layout="vertical" margin={{ left: 40 }}>
                   <XAxis type="number" tickFormatter={(v: number) => `${v}%`} domain={[0, 100]} tick={{ fontSize: 12 }} />
-                  <YAxis type="category" dataKey="name" tick={{ fontSize: 12 }} width={120} />
+                  <YAxis
+                    type="category"
+                    dataKey="name"
+                    tick={{ fontSize: 12 }}
+                    width={140}
+                    tickFormatter={(v: string) => v.length > 14 ? v.slice(0, 12) + '...' : v}
+                  />
                   <Tooltip
                     formatter={(value: unknown) => [`${value}%`, 'Weight']}
                     contentStyle={{ borderRadius: '8px', fontSize: '13px', border: '1px solid #e5e7eb' }}

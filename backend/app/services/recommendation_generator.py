@@ -362,6 +362,12 @@ def generate_recommendations(
         logger.info("No position summaries provided; skipping recommendation generation")
         return []
 
+    logger.info(
+        "Starting recommendation generation for %d positions: %s",
+        len(position_summaries),
+        [ps.get("ticker") for ps in position_summaries],
+    )
+
     try:
         from langchain_openai import ChatOpenAI
 
@@ -379,6 +385,10 @@ def generate_recommendations(
             position_summaries, allocation, concentration, sector_breakdown
         )
 
+        logger.debug(
+            "Recommendation LLM prompt length: %d chars", len(user_prompt)
+        )
+
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -390,9 +400,14 @@ def generate_recommendations(
             tool_choice={"type": "function", "function": {"name": "submit_order_recommendations"}},
         )
         response = llm_with_tools.invoke(messages)
+        logger.info(
+            "LLM recommendation response received (tool_calls=%d)",
+            len(getattr(response, "tool_calls", None) or []),
+        )
 
         # Extract tool calls from the response
         raw_recs = _extract_recommendations_from_response(response)
+        logger.info("Extracted %d raw recommendations from LLM response", len(raw_recs))
 
         # Validate each recommendation
         validated: list[dict[str, Any]] = []

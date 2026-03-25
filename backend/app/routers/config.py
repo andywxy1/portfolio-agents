@@ -10,10 +10,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.config import Settings, settings
+from app.middleware.auth import require_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,9 @@ def _reload_settings(env_vars: dict[str, str]) -> None:
 
     Weight threshold values are normalised to fractions (0-1) if they arrive
     as percentage integers (e.g. 10 instead of 0.10) from the frontend.
+
+    Each field is validated individually -- an invalid value for one field
+    does not prevent other fields from being applied.
     """
     _WEIGHT_THRESHOLD_KEYS = {"WEIGHT_HEAVY_THRESHOLD", "WEIGHT_MEDIUM_THRESHOLD"}
 
@@ -121,13 +125,30 @@ def _reload_settings(env_vars: dict[str, str]) -> None:
                         # Normalise weight thresholds sent as percentages
                         if key in _WEIGHT_THRESHOLD_KEYS and value > 1:
                             value = value / 100.0
+                        # Validate: weight thresholds must be in [0, 1]
+                        if key in _WEIGHT_THRESHOLD_KEYS and not (0 <= value <= 1):
+                            logger.warning(
+                                "Invalid value for %s: %.4f (must be between 0 and 1); skipping",
+                                key, value,
+                            )
+                            continue
                         object.__setattr__(settings, attr, value)
                     elif annotation is int:
-                        object.__setattr__(settings, attr, int(raw))
+                        int_value = int(raw)
+                        if key == "PORT" and not (1 <= int_value <= 65535):
+                            logger.warning(
+                                "Invalid value for PORT: %d (must be 1-65535); skipping",
+                                int_value,
+                            )
+                            continue
+                        object.__setattr__(settings, attr, int_value)
                     else:
                         object.__setattr__(settings, attr, raw)
-                except (ValueError, TypeError):
-                    object.__setattr__(settings, attr, raw)
+                except (ValueError, TypeError) as exc:
+                    logger.warning(
+                        "Invalid value for config key %s: %r (%s); skipping",
+                        key, raw, exc,
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +157,9 @@ def _reload_settings(env_vars: dict[str, str]) -> None:
 
 
 @router.get("")
-async def get_config() -> dict[str, Any]:
+async def get_config(
+    user_id: str = Depends(require_api_key),
+) -> dict[str, Any]:
     """Return current configuration with secrets masked."""
     return _get_current_config()
 
@@ -147,7 +170,10 @@ class ConfigUpdate(BaseModel):
 
 
 @router.put("")
-async def update_config(body: ConfigUpdate) -> dict[str, Any]:
+async def update_config(
+    body: ConfigUpdate,
+    user_id: str = Depends(require_api_key),
+) -> dict[str, Any]:
     """Update configuration values, write to .env, and reload."""
     raw = body.model_dump(exclude_unset=True)
 
@@ -224,7 +250,7 @@ class ValidateRequest(BaseModel):
 
 
 @router.post("/validate", response_model=ValidateResponse)
-async def validate_connections(body: ValidateRequest | None = None) -> ValidateResponse:
+def validate_connections(body: ValidateRequest | None = None) -> ValidateResponse:
     """Test Alpaca and LLM connections. Uses request body values if provided, else saved settings."""
     overrides = body.model_dump(exclude_none=True) if body else {}
     alpaca_result = _test_alpaca(overrides)

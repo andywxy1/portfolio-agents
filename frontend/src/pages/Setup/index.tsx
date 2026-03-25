@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConfig, useUpdateConfig, useValidateConfig, useConfigStatus } from '../../api/hooks';
 import { useToast } from '../../components/Toast';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import type { AppConfig, ValidationResult } from '../../types';
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,10 @@ const DEFAULT_CONFIG: Partial<AppConfig> = {
   weight_medium_threshold: 3,
 };
 
+// Session storage key for progress persistence (Fix #12)
+const SESSION_KEY_STEP = 'setup_step';
+const SESSION_KEY_FORM = 'setup_form';
+
 // ---------------------------------------------------------------------------
 // Setup Page
 // ---------------------------------------------------------------------------
@@ -43,12 +48,42 @@ export default function Setup() {
   // Settings mode: user is already configured and is editing settings
   const settingsMode = configStatus?.configured === true;
 
-  const [step, setStep] = useState(0);
-  const [form, setForm] = useState<Partial<AppConfig>>(() => ({
-    ...DEFAULT_CONFIG,
-    ...existingConfig,
-  }));
-  const [validation, setValidation] = useState<ValidationResult | null>(null);
+  // Fix #12: Restore step from sessionStorage
+  const [step, setStep] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = sessionStorage.getItem(SESSION_KEY_STEP);
+      if (saved != null) {
+        const n = Number(saved);
+        if (n >= 0 && n < STEPS.length) return n;
+      }
+    }
+    return 0;
+  });
+
+  // Fix #12: Restore form from sessionStorage, merging with defaults and existing config
+  const [form, setForm] = useState<Partial<AppConfig>>(() => {
+    let sessionForm: Partial<AppConfig> = {};
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = sessionStorage.getItem(SESSION_KEY_FORM);
+        if (saved) sessionForm = JSON.parse(saved);
+      } catch { /* ignore */ }
+    }
+    return {
+      ...DEFAULT_CONFIG,
+      ...existingConfig,
+      ...sessionForm,
+    };
+  });
+
+  // Fix #9 & #10: Separate validation state per step
+  const [alpacaValidation, setAlpacaValidation] = useState<ValidationResult | null>(null);
+  const [llmValidation, setLlmValidation] = useState<ValidationResult | null>(null);
+
+  // Fix #9: Per-step field error tracking
+  const [alpacaFieldErrors, setAlpacaFieldErrors] = useState<Record<string, string>>({});
+  const [llmFieldErrors, setLlmFieldErrors] = useState<Record<string, string>>({});
+
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showPasswords, setShowPasswords] = useState<Record<string, boolean>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -63,6 +98,10 @@ export default function Setup() {
   // Track which fields the user has actually changed (Fix 5)
   const changedFieldsRef = useRef<Set<string>>(new Set());
 
+  // Fix #14: Track unsaved changes for settings mode
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [showDiscardDialog, setShowDiscardDialog] = useState(false);
+
   // Reload form state when existingConfig loads (Fix 4)
   useEffect(() => {
     if (existingConfig) {
@@ -72,10 +111,26 @@ export default function Setup() {
     }
   }, [existingConfig]);
 
+  // Fix #12: Persist step and form to sessionStorage
+  useEffect(() => {
+    if (!settingsMode) {
+      sessionStorage.setItem(SESSION_KEY_STEP, String(step));
+    }
+  }, [step, settingsMode]);
+
+  useEffect(() => {
+    if (!settingsMode) {
+      try {
+        sessionStorage.setItem(SESSION_KEY_FORM, JSON.stringify(form));
+      } catch { /* ignore quota errors */ }
+    }
+  }, [form, settingsMode]);
+
   const updateField = useCallback(
     <K extends keyof AppConfig>(key: K, value: AppConfig[K]) => {
       changedFieldsRef.current.add(key);
       setForm((prev) => ({ ...prev, [key]: value }));
+      setHasUnsavedChanges(true);
     },
     []
   );
@@ -89,23 +144,23 @@ export default function Setup() {
   }, []);
 
   const handleTestAlpaca = useCallback(async () => {
-    setValidation(null);
+    setAlpacaValidation(null);
     const result = await validateConfigMutation.mutateAsync({
       alpaca_api_key: form.alpaca_api_key,
       alpaca_secret_key: form.alpaca_secret_key,
       alpaca_base_url: form.alpaca_base_url,
     });
-    setValidation(result);
+    setAlpacaValidation(result);
   }, [form.alpaca_api_key, form.alpaca_secret_key, form.alpaca_base_url, validateConfigMutation]);
 
   const handleTestLLM = useCallback(async () => {
-    setValidation(null);
+    setLlmValidation(null);
     const result = await validateConfigMutation.mutateAsync({
       llm_base_url: form.llm_base_url,
       llm_api_key: form.llm_api_key,
       llm_quick_model: form.llm_quick_model,
     });
-    setValidation(result);
+    setLlmValidation(result);
   }, [form.llm_base_url, form.llm_api_key, form.llm_quick_model, validateConfigMutation]);
 
   const buildPayload = useCallback(() => {
@@ -132,6 +187,9 @@ export default function Setup() {
     try {
       const payload = buildPayload();
       await updateConfig.mutateAsync(payload);
+      // Fix #12: Clear session storage on successful save
+      sessionStorage.removeItem(SESSION_KEY_STEP);
+      sessionStorage.removeItem(SESSION_KEY_FORM);
       setStep(STEPS.length - 1);
     } catch (err: any) {
       setSaveError(err?.message ?? 'Failed to save configuration');
@@ -146,6 +204,7 @@ export default function Setup() {
       await updateConfig.mutateAsync(payload);
       toast.success('Settings saved successfully');
       changedFieldsRef.current.clear();
+      setHasUnsavedChanges(false);
     } catch (err: any) {
       setSaveError(err?.message ?? 'Failed to save configuration');
       toast.error(err?.message ?? 'Failed to save configuration');
@@ -153,125 +212,202 @@ export default function Setup() {
   }, [buildPayload, updateConfig, toast]);
 
   const handleLaunch = useCallback(() => {
+    // Fix #12: Clear session storage on launch
+    sessionStorage.removeItem(SESSION_KEY_STEP);
+    sessionStorage.removeItem(SESSION_KEY_FORM);
     navigate('/');
   }, [navigate]);
 
+  // Fix #14: Navigate back with unsaved changes check
+  const handleBackToDashboard = useCallback(() => {
+    if (hasUnsavedChanges) {
+      setShowDiscardDialog(true);
+    } else {
+      navigate('/');
+    }
+  }, [hasUnsavedChanges, navigate]);
+
+  // Fix #9: Validate fields before advancing
+  const validateAlpacaStep = useCallback((): boolean => {
+    const errors: Record<string, string> = {};
+    if (!form.alpaca_api_key?.trim()) errors.alpaca_api_key = 'API Key is required';
+    if (!form.alpaca_secret_key?.trim()) errors.alpaca_secret_key = 'Secret Key is required';
+    setAlpacaFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  }, [form.alpaca_api_key, form.alpaca_secret_key]);
+
+  const validateLlmStep = useCallback((): boolean => {
+    const errors: Record<string, string> = {};
+    if (!form.llm_base_url?.trim()) errors.llm_base_url = 'Base URL is required';
+    if (!form.llm_api_key?.trim()) errors.llm_api_key = 'API Key is required';
+    setLlmFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  }, [form.llm_base_url, form.llm_api_key]);
+
   const next = () => {
+    // Fix #9: Validate before advancing
+    if (step === 1 && !validateAlpacaStep()) return;
+    if (step === 2 && !validateLlmStep()) return;
+
     if (step === STEPS.length - 2) {
       handleSave();
     } else {
-      setValidation(null);
+      // Fix #10: Don't clear validation when navigating between steps
       setStep((s) => Math.min(s + 1, STEPS.length - 1));
     }
   };
 
   const back = () => {
-    setValidation(null);
+    // Fix #10: Don't clear validation when navigating between steps
     setStep((s) => Math.max(s - 1, 0));
   };
 
   // ---------------------------------------------------------------------------
   // Settings Mode: single-page layout with collapsible cards
+  // Fix #13: Render within a sidebar layout when in settings mode
   // ---------------------------------------------------------------------------
   if (settingsMode) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 px-4 py-12">
-        {/* Back button */}
-        <button
-          type="button"
-          onClick={() => navigate('/')}
-          className="fixed left-4 top-4 z-50 flex items-center gap-2 rounded-lg bg-slate-800/90 px-4 py-2.5 text-sm font-medium text-slate-300 shadow-lg backdrop-blur transition-colors hover:bg-slate-700 hover:text-white"
-        >
-          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
-          </svg>
-          Back to Dashboard
-        </button>
-
-        <div className="w-full max-w-xl">
-          {/* Header */}
-          <div className="mb-6 text-center">
-            <h1 className="text-2xl font-bold text-white">Settings</h1>
-            <p className="mt-1 text-sm text-slate-400">Manage your connections and analysis configuration.</p>
-          </div>
-
-          {/* Alpaca Section */}
-          <CollapsibleCard
-            title="Alpaca API Keys"
-            subtitle="Brokerage connection"
-            expanded={expandedSections.alpaca}
-            onToggle={() => toggleSection('alpaca')}
-          >
-            <AlpacaStep
-              form={form}
-              updateField={updateField}
-              showPasswords={showPasswords}
-              togglePassword={togglePassword}
-              onTest={handleTestAlpaca}
-              testing={validateConfigMutation.isPending}
-              validation={validation}
-            />
-          </CollapsibleCard>
-
-          {/* LLM Section */}
-          <CollapsibleCard
-            title="LLM Configuration"
-            subtitle="AI model settings"
-            expanded={expandedSections.llm}
-            onToggle={() => toggleSection('llm')}
-          >
-            <LLMStep
-              form={form}
-              updateField={updateField}
-              showPasswords={showPasswords}
-              togglePassword={togglePassword}
-              onTest={handleTestLLM}
-              testing={validateConfigMutation.isPending}
-              validation={validation}
-            />
-          </CollapsibleCard>
-
-          {/* Advanced Section */}
-          <CollapsibleCard
-            title="Advanced Settings"
-            subtitle="Thresholds and API key"
-            expanded={expandedSections.advanced}
-            onToggle={() => toggleSection('advanced')}
-          >
-            <AdvancedStep
-              form={form}
-              updateField={updateField}
-              showPasswords={showPasswords}
-              togglePassword={togglePassword}
-              showAdvanced={true}
-              setShowAdvanced={() => {}}
-            />
-          </CollapsibleCard>
-
-          {/* Save / Back footer */}
-          <div className="mt-6 flex items-center justify-between">
-            <button
-              type="button"
-              onClick={() => navigate('/')}
-              className="rounded-lg px-4 py-2 text-sm font-medium text-slate-400 transition-colors hover:text-white"
-            >
-              Back to Dashboard
-            </button>
-
-            {saveError && (
-              <p className="text-sm text-red-400">{saveError}</p>
-            )}
-
-            <button
-              type="button"
-              onClick={handleSettingsSave}
-              disabled={updateConfig.isPending}
-              className="rounded-lg bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20 transition-all hover:bg-emerald-500 disabled:opacity-50"
-            >
-              {updateConfig.isPending ? 'Saving...' : 'Save'}
-            </button>
-          </div>
+    const settingsContent = (
+      <div className="w-full max-w-xl mx-auto py-8 px-4">
+        {/* Header */}
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
+          <p className="mt-1 text-sm text-gray-500">Manage your connections and analysis configuration.</p>
         </div>
+
+        {/* Alpaca Section */}
+        <SettingsCollapsibleCard
+          title="Alpaca API Keys"
+          subtitle="Brokerage connection"
+          expanded={expandedSections.alpaca}
+          onToggle={() => toggleSection('alpaca')}
+        >
+          <AlpacaStep
+            form={form}
+            updateField={updateField}
+            showPasswords={showPasswords}
+            togglePassword={togglePassword}
+            onTest={handleTestAlpaca}
+            testing={validateConfigMutation.isPending}
+            validation={alpacaValidation}
+            fieldErrors={{}}
+          />
+        </SettingsCollapsibleCard>
+
+        {/* LLM Section */}
+        <SettingsCollapsibleCard
+          title="LLM Configuration"
+          subtitle="AI model settings"
+          expanded={expandedSections.llm}
+          onToggle={() => toggleSection('llm')}
+        >
+          <LLMStep
+            form={form}
+            updateField={updateField}
+            showPasswords={showPasswords}
+            togglePassword={togglePassword}
+            onTest={handleTestLLM}
+            testing={validateConfigMutation.isPending}
+            validation={llmValidation}
+            fieldErrors={{}}
+          />
+        </SettingsCollapsibleCard>
+
+        {/* Advanced Section */}
+        <SettingsCollapsibleCard
+          title="Advanced Settings"
+          subtitle="Thresholds and API key"
+          expanded={expandedSections.advanced}
+          onToggle={() => toggleSection('advanced')}
+        >
+          <AdvancedStep
+            form={form}
+            updateField={updateField}
+            showPasswords={showPasswords}
+            togglePassword={togglePassword}
+            showAdvanced={true}
+            setShowAdvanced={() => {}}
+          />
+        </SettingsCollapsibleCard>
+
+        {/* Save / Back footer */}
+        <div className="mt-6 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={handleBackToDashboard}
+            className="rounded-lg px-4 py-2 text-sm font-medium text-gray-500 transition-colors hover:text-gray-900"
+          >
+            Back to Dashboard
+          </button>
+
+          {saveError && (
+            <p className="text-sm text-red-600">{saveError}</p>
+          )}
+
+          <button
+            type="button"
+            onClick={handleSettingsSave}
+            disabled={updateConfig.isPending}
+            className="rounded-lg bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition-all hover:bg-emerald-500 disabled:opacity-50"
+          >
+            {updateConfig.isPending ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+
+        {/* Fix #14: Unsaved changes dialog */}
+        <ConfirmDialog
+          open={showDiscardDialog}
+          title="Unsaved Changes"
+          message="You have unsaved changes. Discard?"
+          confirmLabel="Discard"
+          cancelLabel="Stay"
+          destructive
+          onConfirm={() => { setShowDiscardDialog(false); navigate('/'); }}
+          onCancel={() => setShowDiscardDialog(false)}
+        />
+      </div>
+    );
+
+    // Fix #13: Wrap in sidebar layout (simplified inline sidebar to avoid broken Sidebar import)
+    return (
+      <div className="flex h-screen">
+        <aside className="hidden lg:flex h-full w-64 flex-col bg-slate-900 text-slate-300 flex-shrink-0">
+          <div className="flex items-center gap-3 px-6 py-5 border-b border-slate-700/50">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400 font-bold text-lg">
+              P
+            </div>
+            <div>
+              <h1 className="text-sm font-semibold text-white leading-tight">Portfolio Agents</h1>
+              <p className="text-xs text-slate-500">AI-Powered Analysis</p>
+            </div>
+          </div>
+          <nav className="flex-1 px-3 py-4 space-y-1">
+            {[
+              { to: '/', label: 'Dashboard' },
+              { to: '/holdings', label: 'Holdings' },
+              { to: '/analysis', label: 'Analysis Results' },
+              { to: '/recommendations', label: 'Recommendations' },
+              { to: '/history', label: 'History' },
+            ].map(item => (
+              <a
+                key={item.to}
+                href={item.to}
+                onClick={(e) => { e.preventDefault(); navigate(item.to); }}
+                className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 transition-colors"
+              >
+                {item.label}
+              </a>
+            ))}
+          </nav>
+          <div className="border-t border-slate-700/50 px-3 py-3">
+            <div className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium bg-slate-800 text-white">
+              Settings
+            </div>
+          </div>
+        </aside>
+        <main className="flex-1 overflow-y-auto bg-gray-50">
+          {settingsContent}
+        </main>
       </div>
     );
   }
@@ -324,7 +460,8 @@ export default function Setup() {
                 togglePassword={togglePassword}
                 onTest={handleTestAlpaca}
                 testing={validateConfigMutation.isPending}
-                validation={validation}
+                validation={alpacaValidation}
+                fieldErrors={alpacaFieldErrors}
               />
             )}
             {step === 2 && (
@@ -335,7 +472,8 @@ export default function Setup() {
                 togglePassword={togglePassword}
                 onTest={handleTestLLM}
                 testing={validateConfigMutation.isPending}
-                validation={validation}
+                validation={llmValidation}
+                fieldErrors={llmFieldErrors}
               />
             )}
             {step === 3 && (
@@ -401,10 +539,10 @@ export default function Setup() {
 }
 
 // ---------------------------------------------------------------------------
-// Collapsible Card (settings mode)
+// Collapsible Card (settings mode - light theme for sidebar layout)
 // ---------------------------------------------------------------------------
 
-function CollapsibleCard({
+function SettingsCollapsibleCard({
   title,
   subtitle,
   expanded,
@@ -418,18 +556,18 @@ function CollapsibleCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="mb-4 rounded-2xl border border-slate-700/50 bg-slate-800/80 shadow-xl backdrop-blur">
+    <div className="mb-4 rounded-xl border border-gray-200 bg-white shadow-sm">
       <button
         type="button"
         onClick={onToggle}
         className="flex w-full items-center justify-between px-6 py-4 text-left"
       >
         <div>
-          <h2 className="text-base font-semibold text-white">{title}</h2>
-          <p className="text-xs text-slate-500">{subtitle}</p>
+          <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+          <p className="text-xs text-gray-500">{subtitle}</p>
         </div>
         <svg
-          className={`h-5 w-5 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
+          className={`h-5 w-5 text-gray-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -439,13 +577,15 @@ function CollapsibleCard({
         </svg>
       </button>
       {expanded && (
-        <div className="border-t border-slate-700/50 px-6 pb-6 pt-4">
+        <div className="border-t border-gray-100 px-6 pb-6 pt-4">
           {children}
         </div>
       )}
     </div>
   );
 }
+
+// (Removed unused dark-themed CollapsibleCard; SettingsCollapsibleCard above is used instead)
 
 // ---------------------------------------------------------------------------
 // Step Components
@@ -485,6 +625,7 @@ interface ConnectionStepProps extends StepProps {
   onTest: () => void;
   testing: boolean;
   validation: ValidationResult | null;
+  fieldErrors: Record<string, string>;
 }
 
 function AlpacaStep({
@@ -495,6 +636,7 @@ function AlpacaStep({
   onTest,
   testing,
   validation,
+  fieldErrors,
 }: ConnectionStepProps) {
   return (
     <div>
@@ -519,6 +661,7 @@ function AlpacaStep({
           show={showPasswords['alpaca_api_key']}
           onToggle={() => togglePassword('alpaca_api_key')}
           placeholder="PK..."
+          error={fieldErrors.alpaca_api_key}
         />
         <PasswordField
           label="Secret Key"
@@ -527,6 +670,7 @@ function AlpacaStep({
           show={showPasswords['alpaca_secret_key']}
           onToggle={() => togglePassword('alpaca_secret_key')}
           placeholder="Your Alpaca secret key"
+          error={fieldErrors.alpaca_secret_key}
         />
 
         <div>
@@ -583,6 +727,7 @@ function LLMStep({
   onTest,
   testing,
   validation,
+  fieldErrors,
 }: ConnectionStepProps) {
   return (
     <div>
@@ -597,6 +742,7 @@ function LLMStep({
           value={form.llm_base_url ?? ''}
           onChange={(v) => updateField('llm_base_url', v)}
           placeholder="http://localhost:8317/v1"
+          error={fieldErrors.llm_base_url}
         />
 
         <PasswordField
@@ -606,6 +752,7 @@ function LLMStep({
           show={showPasswords['llm_api_key']}
           onToggle={() => togglePassword('llm_api_key')}
           placeholder="sk-..."
+          error={fieldErrors.llm_api_key}
         />
 
         <SelectField
@@ -645,8 +792,12 @@ function AdvancedStep({
   return (
     <div>
       <h2 className="mb-1 text-xl font-bold text-white">Analysis Settings</h2>
-      <p className="mb-6 text-sm text-slate-400">
+      <p className="mb-2 text-sm text-slate-400">
         Optionally tune how positions are categorized by weight.
+      </p>
+      {/* Fix #11: Skip guidance */}
+      <p className="mb-6 text-xs text-slate-500">
+        These settings are optional. You can skip this step and use defaults.
       </p>
 
       <button
@@ -753,12 +904,14 @@ function InputField({
   onChange,
   placeholder,
   className,
+  error,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   className?: string;
+  error?: string;
 }) {
   return (
     <div className={className}>
@@ -768,8 +921,11 @@ function InputField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full rounded-lg border border-slate-600 bg-slate-700/50 px-3 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition-colors focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+        className={`w-full rounded-lg border bg-slate-700/50 px-3 py-2.5 text-sm text-white placeholder-slate-500 outline-none transition-colors focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 ${
+          error ? 'border-red-500' : 'border-slate-600'
+        }`}
       />
+      {error && <p className="mt-1 text-xs text-red-400">{error}</p>}
     </div>
   );
 }
@@ -781,6 +937,7 @@ function PasswordField({
   show,
   onToggle,
   placeholder,
+  error,
 }: {
   label: string;
   value: string;
@@ -788,6 +945,7 @@ function PasswordField({
   show: boolean;
   onToggle: () => void;
   placeholder?: string;
+  error?: string;
 }) {
   return (
     <div>
@@ -798,7 +956,9 @@ function PasswordField({
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
-          className="w-full rounded-lg border border-slate-600 bg-slate-700/50 px-3 py-2.5 pr-10 text-sm text-white placeholder-slate-500 outline-none transition-colors focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+          className={`w-full rounded-lg border bg-slate-700/50 px-3 py-2.5 pr-10 text-sm text-white placeholder-slate-500 outline-none transition-colors focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 ${
+            error ? 'border-red-500' : 'border-slate-600'
+          }`}
         />
         <button
           type="button"
@@ -809,6 +969,7 @@ function PasswordField({
           {show ? <EyeOffIcon className="h-4 w-4" /> : <EyeIcon className="h-4 w-4" />}
         </button>
       </div>
+      {error && <p className="mt-1 text-xs text-red-400">{error}</p>}
     </div>
   );
 }

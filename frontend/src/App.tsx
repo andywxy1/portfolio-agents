@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Layout } from './components/Layout';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './components/Toast';
+import { OnboardingGuide } from './components/OnboardingGuide';
 import { lazy, Suspense } from 'react';
 import { LoadingSpinner } from './components/LoadingSpinner';
 import { useConfigStatus } from './api/hooks';
@@ -118,6 +119,8 @@ export default function App() {
       <ToastProvider>
         <ErrorBoundary>
           <BrowserRouter>
+            {/* Fix #16: Post-setup onboarding overlay (localStorage-persisted) */}
+            <OnboardingGuide />
             <AppRoutes />
           </BrowserRouter>
         </ErrorBoundary>

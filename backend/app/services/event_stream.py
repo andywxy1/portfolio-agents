@@ -71,13 +71,21 @@ class AnalysisEventStream:
         This does NOT block; the caller is responsible for polling or
         sleeping between calls.  This design avoids holding a thread
         lock across an async boundary.
+
+        The event slice is copied under the lock, then yielded outside
+        the lock so that writers are not blocked while the SSE endpoint
+        serialises events.
         """
         with self._lock:
             start_idx = last_id + 1
             if start_idx < len(self.events):
-                # Yield a snapshot of new events
-                for event in self.events[start_idx:]:
-                    yield event
+                snapshot = self.events[start_idx:]
+            else:
+                snapshot = []
+
+        # Yield from the snapshot outside the lock
+        for event in snapshot:
+            yield event
 
     def wait_for_event(self, timeout: float = 0.5) -> bool:
         """Block until a new event is emitted or timeout expires.

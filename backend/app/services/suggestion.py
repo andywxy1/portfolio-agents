@@ -17,7 +17,11 @@ from app.utils import utc_now
 
 logger = logging.getLogger(__name__)
 
-# S&P 500 approximate sector weights (as of early 2026, rounded)
+# S&P 500 approximate sector weights (as of early 2026, rounded).
+# NOTE: These are hardcoded approximations and will drift over time as
+# sector weights change. For production use, consider fetching live sector
+# weights from Alpaca or another data provider if available. Last manually
+# reviewed: Q1 2026.
 SP500_SECTOR_WEIGHTS: dict[str, float] = {
     "Information Technology": 0.30,
     "Health Care": 0.12,
@@ -32,7 +36,10 @@ SP500_SECTOR_WEIGHTS: dict[str, float] = {
     "Materials": 0.03,
 }
 
-# Top stocks per GICS sector with metadata for suggestions
+# Top stocks per GICS sector with metadata for suggestions.
+# NOTE: Market caps, P/E ratios, and dividend yields are approximate point-in-time
+# values and will go stale. These are used only for rough suggestion sizing and
+# display -- not for trading decisions. Last manually reviewed: Q1 2026.
 SECTOR_TOP_STOCKS: dict[str, list[dict]] = {
     "Information Technology": [
         {"ticker": "AAPL", "name": "Apple Inc.", "industry": "Consumer Electronics", "market_cap": 3.2e12, "pe": 32.5, "div_yield": 0.005},

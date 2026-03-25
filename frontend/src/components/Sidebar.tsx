@@ -1,20 +1,12 @@
 import { NavLink } from 'react-router-dom';
-import { useActiveAnalysisJob } from '../hooks/useActiveAnalysis';
-
-const navItems = [
-  { to: '/', label: 'Dashboard', icon: DashboardIcon },
-  { to: '/holdings', label: 'Holdings', icon: HoldingsIcon },
-  { to: '/analysis', label: 'Analysis', icon: AnalysisIcon },
-  { to: '/recommendations', label: 'Recommendations', icon: RecommendationsIcon },
-  { to: '/history', label: 'History', icon: HistoryIcon },
-];
+import { useActiveAnalysis } from '../hooks/useActiveAnalysis';
 
 interface SidebarProps {
   onClose?: () => void;
 }
 
 export function Sidebar({ onClose }: SidebarProps) {
-  const activeJobId = useActiveAnalysisJob();
+  const { activeJobId, completedRecently, completionJobId } = useActiveAnalysis();
 
   return (
     <aside className="flex h-full w-64 flex-col bg-slate-900 text-slate-300">
@@ -45,7 +37,8 @@ export function Sidebar({ onClose }: SidebarProps) {
 
       {/* Navigation */}
       <nav className="flex-1 px-3 py-4 space-y-1">
-        {navItems.map(({ to, label, icon: Icon }) => (
+        {/* Fix #14: navItems defined below icon components, now inlined to avoid hoisting issues */}
+        {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}
@@ -63,7 +56,7 @@ export function Sidebar({ onClose }: SidebarProps) {
           </NavLink>
         ))}
 
-        {/* Live Analysis link - visible only when an analysis is actively running */}
+        {/* Fix #17: Live Analysis link - visible when running OR for 5 min after completion */}
         {activeJobId && (
           <NavLink
             to={`/analysis/progress/${activeJobId}`}
@@ -80,6 +73,23 @@ export function Sidebar({ onClose }: SidebarProps) {
               <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
             </span>
             <span className="truncate">Live Analysis</span>
+          </NavLink>
+        )}
+        {!activeJobId && completedRecently && completionJobId && (
+          <NavLink
+            to="/analysis"
+            className={({ isActive }) =>
+              `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                isActive
+                  ? 'bg-slate-800 text-slate-300'
+                  : 'text-slate-500 hover:bg-slate-800/50 hover:text-slate-400'
+              }`
+            }
+          >
+            <svg className="h-5 w-5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="truncate">Last Analysis</span>
           </NavLink>
         )}
       </nav>
@@ -127,7 +137,7 @@ function HoldingsIcon({ className }: { className?: string }) {
   );
 }
 
-function AnalysisIcon({ className }: { className?: string }) {
+function AnalysisResultsIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" />
@@ -163,3 +173,13 @@ function SettingsIcon({ className }: { className?: string }) {
     </svg>
   );
 }
+
+// Fix #14: navItems defined AFTER icon component definitions to avoid hoisting issues
+// Fix #7: Renamed "Analysis" to "Analysis Results" in the nav
+const NAV_ITEMS = [
+  { to: '/', label: 'Dashboard', icon: DashboardIcon },
+  { to: '/holdings', label: 'Holdings', icon: HoldingsIcon },
+  { to: '/analysis', label: 'Analysis Results', icon: AnalysisResultsIcon },
+  { to: '/recommendations', label: 'Recommendations', icon: RecommendationsIcon },
+  { to: '/history', label: 'History', icon: HistoryIcon },
+];

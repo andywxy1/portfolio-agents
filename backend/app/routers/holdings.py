@@ -144,7 +144,21 @@ async def import_holdings_csv(
         existing_tickers.add(ticker_raw)
         imported += 1
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        # Return a meaningful error indicating which rows failed rather
+        # than letting the 500 propagate to the client.
+        return {
+            "imported": 0,
+            "errors": errors + [
+                {
+                    "row": 0,
+                    "message": f"Database commit failed after parsing {imported} rows: {str(exc)[:200]}",
+                }
+            ],
+        }
 
     return {"imported": imported, "errors": errors}
 

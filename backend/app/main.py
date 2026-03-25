@@ -134,6 +134,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     _recover_stuck_jobs()
     logger.info("Cleaning up stale cache...")
     _cleanup_stale_price_cache()
+
+    # Warn prominently if the API key is still the default placeholder
+    if settings.api_key == "dev-api-key-change-me":
+        logger.warning(
+            "!!! SECURITY WARNING: Running with default API key 'dev-api-key-change-me'. "
+            "Authentication is effectively disabled. Set a strong API_KEY in your .env "
+            "file before exposing this service to a network. !!!"
+        )
+
     logger.info("Server ready.")
     yield
     logger.info("Shutting down.")

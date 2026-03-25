@@ -120,7 +120,8 @@ export function useDeleteHolding() {
 
 export function useBatchPrices(tickers: string[], enabled = true) {
   return useQuery<Record<string, PriceData>>({
-    queryKey: ['prices', 'batch', tickers],
+    // Fix #6: Sort and join tickers into a stable string for consistent cache keys
+    queryKey: ['prices', 'batch', [...tickers].sort().join(',')],
     queryFn: async () => {
       if (USE_MOCKS || tickers.length === 0) return {};
       const qs = `tickers=${tickers.map(t => encodeURIComponent(t)).join(',')}`;

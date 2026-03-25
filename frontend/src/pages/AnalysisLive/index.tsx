@@ -4,8 +4,8 @@ import { usePageTitle } from '../../hooks/usePageTitle';
 import { clearActiveAnalysisJob } from '../../hooks/useActiveAnalysis';
 import { useToast } from '../../components/Toast';
 import { apiClient } from '../../api/client';
-import { useAnalysisJob, useCancelAnalysis } from '../../api/hooks';
-import type { LatestAnalysisResponse } from '../../types';
+import { useAnalysisJob, useCancelAnalysis, useBatchPrices } from '../../api/hooks';
+import type { AnalysisJob, PositionAnalysis } from '../../types';
 import {
   useAnalysisStream,
   AGENT_PIPELINE,
@@ -664,6 +664,9 @@ export default function AnalysisLive() {
     return [...set];
   }, [job?.tickers, streamTickers]);
 
+  // Fix #15: Fetch real price data for sparkline using batch prices hook
+  const { data: batchPrices } = useBatchPrices(allTickers, allTickers.length > 0);
+
   // Active ticker tab
   const [activeTicker, setActiveTicker] = useState<string>('');
 
@@ -687,13 +690,15 @@ export default function AnalysisLive() {
     prevComplete.current = isComplete;
   }, [isComplete, soundEnabled]);
 
-  // When analysis completes, fetch full reports from DB to replace truncated SSE data
+  // Fix #17: When analysis completes, fetch full reports from the job endpoint
+  // instead of /analysis/latest which may return wrong job
   const fetchedFullReports = useRef(false);
   useEffect(() => {
     if (!isComplete || !jobId || fetchedFullReports.current) return;
     fetchedFullReports.current = true;
 
-    apiClient.get<LatestAnalysisResponse>('/analysis/latest').then((data) => {
+    // The job endpoint returns full PositionAnalysis objects (not just summaries)
+    apiClient.get<AnalysisJob & { position_analyses?: PositionAnalysis[] }>(`/analysis/jobs/${jobId}`).then((data) => {
       if (!data?.position_analyses?.length) return;
 
       const fullReports = new Map<string, Map<string, string>>();
@@ -773,22 +778,17 @@ export default function AnalysisLive() {
     }
   }, [reportsByTicker, decisions, activeTicker]);
 
-  // Sparkline mock data (since we don't have real price history in SSE)
+  // Fix #15: Use real price data from batchPrices instead of fake data
   const sparklineData = useMemo(() => {
-    // Generate deterministic pseudo-random data from ticker name
-    if (!activeTicker) return [];
-    let seed = 0;
-    for (let i = 0; i < activeTicker.length; i++) seed += activeTicker.charCodeAt(i);
-    const data: number[] = [];
-    let price = 50 + (seed % 200);
-    for (let i = 0; i < 30; i++) {
-      seed = (seed * 16807 + 7) % 2147483647;
-      price += ((seed % 100) - 50) / 10;
-      if (price < 5) price = 5;
-      data.push(price);
+    if (!activeTicker || !batchPrices) return [];
+    const priceEntry = batchPrices[activeTicker];
+    // If the batch prices response includes a history array, use it
+    if (priceEntry && typeof priceEntry === 'object' && 'history' in priceEntry && Array.isArray((priceEntry as any).history)) {
+      return (priceEntry as any).history.map((p: any) => typeof p === 'number' ? p : p.close ?? p.price ?? 0);
     }
-    return data;
-  }, [activeTicker]);
+    // Otherwise no real data available
+    return [];
+  }, [activeTicker, batchPrices]);
 
   // Derived data for active ticker
   const activeStages = stagesByTicker.get(activeTicker) ?? stagesByTicker.get('_all') ?? new Map();
@@ -796,15 +796,30 @@ export default function AnalysisLive() {
   const activeDecision = decisions.get(activeTicker);
   const activeTickerDepth = tickerDepths.get(activeTicker);
 
-  // Messages: merge all tickers or filter to selected
+  // Fix #19: Maintain a pre-merged sorted array, only re-sort on filter change
+  // Append-only sorted array for all events
+  const mergedEventsRef = useRef<StreamEvent[]>([]);
+  const mergedEventsCountRef = useRef(0);
+
   const activeEvents = useMemo(() => {
     if (messageTickerFilter === '_all') {
-      // Merge all ticker events, sorted by timestamp
-      const all: StreamEvent[] = [];
+      // Count total events across all tickers
+      let totalCount = 0;
       for (const [, events] of eventsByTicker) {
-        all.push(...events);
+        totalCount += events.length;
       }
-      return all.sort((a, b) => a.timestamp - b.timestamp);
+      // If new events arrived, append them in order (events arrive chronologically)
+      if (totalCount > mergedEventsCountRef.current) {
+        // Rebuild from scratch on filter change or when we detect resets
+        const all: StreamEvent[] = [];
+        for (const [, events] of eventsByTicker) {
+          all.push(...events);
+        }
+        all.sort((a, b) => a.timestamp - b.timestamp);
+        mergedEventsRef.current = all;
+        mergedEventsCountRef.current = totalCount;
+      }
+      return mergedEventsRef.current;
     }
     return eventsByTicker.get(messageTickerFilter) ?? eventsByTicker.get('_all') ?? [];
   }, [eventsByTicker, messageTickerFilter]);
@@ -889,11 +904,11 @@ export default function AnalysisLive() {
       {/* ================================================================== */}
       <header className="flex-shrink-0 border-b border-gray-800 bg-gray-950 px-4 py-2.5">
         <div className="flex items-center gap-3 flex-wrap">
-          {/* Back button */}
+          {/* Fix #16: Back button goes to /holdings instead of /analysis */}
           <button
-            onClick={() => navigate('/analysis')}
+            onClick={() => navigate('/holdings')}
             className="text-gray-500 hover:text-gray-300 transition-colors"
-            aria-label="Back to analysis"
+            aria-label="Back to holdings"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
@@ -932,11 +947,15 @@ export default function AnalysisLive() {
             )}
           </div>
 
-          {/* Sparkline */}
-          {sparklineData.length > 0 && (
+          {/* Fix #15: Sparkline with real data, or "No data" fallback */}
+          {activeTicker && (
             <div className="hidden sm:flex items-center gap-1.5">
               <span className="text-xs text-gray-500 font-mono">{activeTicker}</span>
-              <Sparkline data={sparklineData} width={120} height={32} />
+              {sparklineData.length > 0 ? (
+                <Sparkline data={sparklineData} width={120} height={32} />
+              ) : (
+                <span className="text-[10px] text-gray-600">No price data</span>
+              )}
             </div>
           )}
 
@@ -1068,8 +1087,8 @@ export default function AnalysisLive() {
             </div>
           </div>
 
-          {/* Bottom: Messages (collapsed, max 300px) */}
-          <div className={`flex-shrink-0 border-t border-gray-800 ${reportsCollapsed ? '' : 'h-[300px]'}`}>
+          {/* Fix #18: Use max-h-[300px] instead of h-[300px] so it shrinks when less content */}
+          <div className={`flex-shrink-0 border-t border-gray-800 ${reportsCollapsed ? '' : 'max-h-[300px]'}`}>
             <button
               onClick={() => setReportsCollapsed(prev => !prev)}
               className="w-full flex items-center justify-between px-3 py-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wider hover:bg-gray-900/50 transition-colors"

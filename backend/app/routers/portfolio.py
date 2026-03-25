@@ -54,7 +54,10 @@ def get_pnl_history(
         .all()
     )
 
-    history: list[dict] = []
+    # Deduplicate by date, keeping the latest entry per day (insights
+    # are ordered by created_at ASC, so later entries overwrite earlier
+    # ones for the same date).
+    by_date: dict[str, dict] = {}
     for insight in insights:
         total_value = insight.total_value
         total_cost = insight.total_cost_basis
@@ -63,13 +66,16 @@ def get_pnl_history(
 
         # Extract date portion from created_at timestamp
         date_str = insight.created_at[:10] if insight.created_at else None
+        if date_str is None:
+            continue
 
-        history.append({
+        by_date[date_str] = {
             "date": date_str,
             "total_value": round(total_value, 2) if total_value is not None else None,
             "total_cost": round(total_cost, 2) if total_cost is not None else None,
             "pnl": round(pnl, 2) if pnl is not None else None,
             "pnl_pct": round(pnl_pct, 6) if pnl_pct is not None else None,
-        })
+        }
 
-    return history
+    # Return sorted by date (string sort is correct for ISO dates)
+    return sorted(by_date.values(), key=lambda d: d["date"])

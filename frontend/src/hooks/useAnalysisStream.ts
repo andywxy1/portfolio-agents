@@ -8,6 +8,19 @@ function onSSE(es: EventSource, event: string, handler: (data: string) => void) 
 }
 
 // ---------------------------------------------------------------------------
+// Safe JSON parse helper (Fix #4)
+// ---------------------------------------------------------------------------
+
+function safeParse(raw: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    console.warn('Failed to parse SSE event data:', raw);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -111,8 +124,6 @@ export function getAgentIcon(agent: string): string {
 // Hook
 // ---------------------------------------------------------------------------
 
-let eventCounter = 0;
-
 export function useAnalysisStream(jobId: string | undefined) {
   const [eventsByTicker, setEventsByTicker] = useState<Map<string, StreamEvent[]>>(new Map());
   const [stagesByTicker, setStagesByTicker] = useState<Map<string, Map<string, AgentStatus>>>(new Map());
@@ -131,6 +142,8 @@ export function useAnalysisStream(jobId: string | undefined) {
   const esRef = useRef<EventSource | null>(null);
   const retriesRef = useRef(0);
   const doneRef = useRef(false);
+  // Fix #2: Move eventCounter from module-level mutable into a ref
+  const eventCounterRef = useRef(0);
   const maxRetries = 3;
 
   const addEvent = useCallback((ticker: string, event: StreamEvent) => {
@@ -145,6 +158,11 @@ export function useAnalysisStream(jobId: string | undefined) {
       if (prev.includes(ticker)) return prev;
       return [...prev, ticker];
     });
+  }, []);
+
+  const nextEventId = useCallback(() => {
+    eventCounterRef.current += 1;
+    return `evt-${eventCounterRef.current}`;
   }, []);
 
   const setStage = useCallback((ticker: string, agent: string, status: AgentStatus) => {
@@ -184,11 +202,12 @@ export function useAnalysisStream(jobId: string | undefined) {
       };
 
       onSSE(es, 'ticker_start', (raw) => {
-        const d = JSON.parse(raw);
-        const ticker = d.ticker ?? '_all';
+        const d = safeParse(raw);
+        if (!d) return;
+        const ticker = (d.ticker as string) ?? '_all';
         setTickerDepths(prev => {
           const next = new Map(prev);
-          next.set(ticker, { depth: d.depth ?? 'auto', position: d.position ?? 0, total: d.total ?? 0 });
+          next.set(ticker, { depth: (d.depth as string) ?? 'auto', position: (d.position as number) ?? 0, total: (d.total as number) ?? 0 });
           return next;
         });
         setActiveTickers(prev => {
@@ -197,23 +216,24 @@ export function useAnalysisStream(jobId: string | undefined) {
           return next;
         });
         if (d.depth) {
-          setOverallDepth(d.depth);
+          setOverallDepth(d.depth as string);
         }
         addEvent(ticker, {
-          id: `evt-${++eventCounter}`,
+          id: nextEventId(),
           type: 'stage_start',
           timestamp: Date.now(),
           ticker,
-          content: `Ticker ${ticker} starting (${d.depth ?? 'auto'} depth)`,
+          content: `Ticker ${ticker} starting (${(d.depth as string) ?? 'auto'} depth)`,
         });
       });
 
       onSSE(es, 'ticker_complete', (raw) => {
-        const d = JSON.parse(raw);
-        const ticker = d.ticker ?? '_all';
+        const d = safeParse(raw);
+        if (!d) return;
+        const ticker = (d.ticker as string) ?? '_all';
         setTickerCompleted(prev => {
           const next = new Map(prev);
-          next.set(ticker, { depth: d.depth ?? 'auto', signal: d.signal ?? '', elapsedSeconds: d.elapsed_seconds ?? 0 });
+          next.set(ticker, { depth: (d.depth as string) ?? 'auto', signal: (d.signal as string) ?? '', elapsedSeconds: (d.elapsed_seconds as number) ?? 0 });
           return next;
         });
         setActiveTickers(prev => {
@@ -222,135 +242,143 @@ export function useAnalysisStream(jobId: string | undefined) {
           return next;
         });
         addEvent(ticker, {
-          id: `evt-${++eventCounter}`,
+          id: nextEventId(),
           type: 'stage_complete',
           timestamp: Date.now(),
           ticker,
-          content: `Ticker ${ticker} complete: ${d.signal ?? 'N/A'} (${d.elapsed_seconds ?? 0}s)`,
+          content: `Ticker ${ticker} complete: ${(d.signal as string) ?? 'N/A'} (${(d.elapsed_seconds as number) ?? 0}s)`,
         });
       });
 
       onSSE(es, 'stage_start', (raw) => {
-        const d = JSON.parse(raw);
-        const ticker = d.ticker ?? '_all';
-        setStage(ticker, d.agent, 'in_progress');
+        const d = safeParse(raw);
+        if (!d) return;
+        const ticker = (d.ticker as string) ?? '_all';
+        setStage(ticker, d.agent as string, 'in_progress');
         addEvent(ticker, {
-          id: `evt-${++eventCounter}`,
+          id: nextEventId(),
           type: 'stage_start',
           timestamp: Date.now(),
           ticker,
-          agent: d.agent,
-          team: d.team,
-          content: `${d.agent} starting...`,
+          agent: d.agent as string,
+          team: d.team as string,
+          content: `${d.agent as string} starting...`,
         });
       });
 
       onSSE(es, 'stage_complete', (raw) => {
-        const d = JSON.parse(raw);
-        const ticker = d.ticker ?? '_all';
+        const d = safeParse(raw);
+        if (!d) return;
+        const ticker = (d.ticker as string) ?? '_all';
         const status: AgentStatus = d.status === 'failed' ? 'failed' : 'completed';
-        setStage(ticker, d.agent, status);
+        setStage(ticker, d.agent as string, status);
         addEvent(ticker, {
-          id: `evt-${++eventCounter}`,
+          id: nextEventId(),
           type: 'stage_complete',
           timestamp: Date.now(),
           ticker,
-          agent: d.agent,
-          team: d.team,
-          content: `${d.agent} ${status}`,
-          status: d.status,
+          agent: d.agent as string,
+          team: d.team as string,
+          content: `${d.agent as string} ${status}`,
+          status: d.status as string,
         });
       });
 
       onSSE(es, 'agent_message', (raw) => {
-        const d = JSON.parse(raw);
-        const ticker = d.ticker ?? '_all';
+        const d = safeParse(raw);
+        if (!d) return;
+        const ticker = (d.ticker as string) ?? '_all';
         addEvent(ticker, {
-          id: `evt-${++eventCounter}`,
+          id: nextEventId(),
           type: 'agent_message',
           timestamp: Date.now(),
           ticker,
-          agent: d.agent,
-          content: d.content,
+          agent: d.agent as string,
+          content: d.content as string,
         });
       });
 
       onSSE(es, 'tool_call', (raw) => {
-        const d = JSON.parse(raw);
-        const ticker = d.ticker ?? '_all';
+        const d = safeParse(raw);
+        if (!d) return;
+        const ticker = (d.ticker as string) ?? '_all';
         addEvent(ticker, {
-          id: `evt-${++eventCounter}`,
+          id: nextEventId(),
           type: 'tool_call',
           timestamp: Date.now(),
           ticker,
-          agent: d.agent,
-          tool: d.tool,
-          params: d.params,
-          content: `${d.tool}(${JSON.stringify(d.params ?? {})})`,
+          agent: d.agent as string,
+          tool: d.tool as string,
+          params: d.params as Record<string, unknown>,
+          content: `${d.tool as string}(${JSON.stringify(d.params ?? {})})`,
         });
       });
 
       onSSE(es, 'tool_result', (raw) => {
-        const d = JSON.parse(raw);
-        const ticker = d.ticker ?? '_all';
+        const d = safeParse(raw);
+        if (!d) return;
+        const ticker = (d.ticker as string) ?? '_all';
         addEvent(ticker, {
-          id: `evt-${++eventCounter}`,
+          id: nextEventId(),
           type: 'tool_result',
           timestamp: Date.now(),
           ticker,
-          agent: d.agent,
-          tool: d.tool,
-          resultPreview: d.result_preview,
-          content: d.result_preview,
+          agent: d.agent as string,
+          tool: d.tool as string,
+          resultPreview: d.result_preview as string,
+          content: d.result_preview as string,
         });
       });
 
       onSSE(es, 'report', (raw) => {
-        const d = JSON.parse(raw);
-        const ticker = d.ticker ?? '_all';
-        addReport(ticker, d.report_type, d.content);
+        const d = safeParse(raw);
+        if (!d) return;
+        const ticker = (d.ticker as string) ?? '_all';
+        addReport(ticker, d.report_type as string, d.content as string);
         addEvent(ticker, {
-          id: `evt-${++eventCounter}`,
+          id: nextEventId(),
           type: 'report',
           timestamp: Date.now(),
           ticker,
-          agent: d.agent,
-          reportType: d.report_type,
-          content: `Report ready: ${d.report_type}`,
+          agent: d.agent as string,
+          reportType: d.report_type as string,
+          content: `Report ready: ${d.report_type as string}`,
         });
       });
 
       onSSE(es, 'decision', (raw) => {
-        const d = JSON.parse(raw);
-        const ticker = d.ticker ?? '_all';
+        const d = safeParse(raw);
+        if (!d) return;
+        const ticker = (d.ticker as string) ?? '_all';
         setDecisions(prev => {
           const next = new Map(prev);
           next.set(ticker, {
             ticker,
-            signal: d.signal,
-            confidence: d.confidence,
-            summary: d.summary,
+            signal: d.signal as string,
+            confidence: d.confidence as number,
+            summary: d.summary as string,
           });
           return next;
         });
-        addReport(ticker, 'decision', d.summary);
+        addReport(ticker, 'decision', d.summary as string);
         addEvent(ticker, {
-          id: `evt-${++eventCounter}`,
+          id: nextEventId(),
           type: 'decision',
           timestamp: Date.now(),
           ticker,
-          signal: d.signal,
-          confidence: d.confidence,
-          summary: d.summary,
-          content: `Decision: ${d.signal} (${Math.round(d.confidence * 100)}% confidence)`,
+          signal: d.signal as string,
+          confidence: d.confidence as number,
+          summary: d.summary as string,
+          content: `Decision: ${d.signal as string} (${Math.round((d.confidence as number) * 100)}% confidence)`,
         });
       });
 
       onSSE(es, 'job_status', (raw) => {
-        const d = JSON.parse(raw);
+        const d = safeParse(raw);
+        if (!d) return;
         setJobProgress({
-          tickersCompleted: d.tickers_completed ?? 0,
-          tickersTotal: d.tickers_total ?? 0,
+          tickersCompleted: (d.tickers_completed as number) ?? 0,
+          tickersTotal: (d.tickers_total as number) ?? 0,
         });
         // Detect terminal statuses so the UI updates immediately
         // (without waiting for the SSE 'done' event or polling)
@@ -360,24 +388,21 @@ export function useAnalysisStream(jobId: string | undefined) {
       });
 
       onSSE(es, 'error', (raw) => {
-        try {
-          const d = JSON.parse(raw);
-          const ticker = d.ticker ?? '_all';
-          if (d.agent) {
-            setStage(ticker, d.agent, 'failed');
-          }
-          addEvent(ticker, {
-            id: `evt-${++eventCounter}`,
-            type: 'error',
-            timestamp: Date.now(),
-            ticker,
-            agent: d.agent,
-            message: d.message,
-            content: d.message ?? 'Unknown error',
-          });
-        } catch {
-          // SSE connection-level error, not a data event
+        const d = safeParse(raw);
+        if (!d) return;
+        const ticker = (d.ticker as string) ?? '_all';
+        if (d.agent) {
+          setStage(ticker, d.agent as string, 'failed');
         }
+        addEvent(ticker, {
+          id: nextEventId(),
+          type: 'error',
+          timestamp: Date.now(),
+          ticker,
+          agent: d.agent as string,
+          message: d.message as string,
+          content: (d.message as string) ?? 'Unknown error',
+        });
       });
 
       onSSE(es, 'done', () => {
@@ -408,7 +433,7 @@ export function useAnalysisStream(jobId: string | undefined) {
     return () => {
       esRef.current?.close();
     };
-  }, [jobId, addEvent, setStage, addReport]);
+  }, [jobId, addEvent, nextEventId, setStage, addReport]);
 
   return {
     eventsByTicker,

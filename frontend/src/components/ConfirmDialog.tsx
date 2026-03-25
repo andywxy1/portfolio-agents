@@ -24,12 +24,18 @@ export function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
+  // Fix #1: Focus Cancel button for destructive dialogs, Confirm for non-destructive
   useEffect(() => {
     if (open) {
-      confirmRef.current?.focus();
+      if (destructive) {
+        cancelRef.current?.focus();
+      } else {
+        confirmRef.current?.focus();
+      }
     }
-  }, [open]);
+  }, [open, destructive]);
 
   useEffect(() => {
     if (!open) return;
@@ -53,6 +59,7 @@ export function ConfirmDialog({
         {children && <div className="mt-3">{children}</div>}
         <div className="mt-6 flex justify-end gap-3">
           <button
+            ref={cancelRef}
             onClick={onCancel}
             className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
           >

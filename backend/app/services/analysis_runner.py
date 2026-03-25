@@ -35,7 +35,7 @@ from app.services.event_stream import (
     get_event_stream,
 )
 from app.services.pipeline_adapter import AnalysisCancelledError, PipelineAdapter
-from app.services.portfolio import TICKER_SECTOR_MAP, get_sector
+from app.services.portfolio import TICKER_SECTOR_MAP, compute_allocation_concentration_sectors, get_sector
 from app.services.recommendation_generator import generate_recommendations
 from app.services.suggestion import generate_suggestions
 from app.utils import utc_now
@@ -476,45 +476,102 @@ class AnalysisRunner:
 
         # ---------------------------------------------------------------
         # Portfolio-level synthesis + recommendations
-        # (Skip for single mode -- no portfolio-level analysis needed)
         # ---------------------------------------------------------------
-        if mode != "single" and not self._is_cancelled(job_id):
+        if not self._is_cancelled(job_id):
+            # Build allocation/concentration/sector data.
+            # For portfolio mode this uses the full holdings list.
+            # For single mode we build minimal data from the analysed ticker
+            # so the recommendation generator still has context.
             try:
-                allocation, concentration, sector_breakdown = (
-                    self._build_portfolio_data(holdings, current_prices)
-                )
-
-                self._generate_portfolio_insight(
-                    db,
-                    job_id,
-                    user_id,
-                    tickers,
-                    holdings,
-                    position_summaries,
-                    allocation,
-                    concentration,
-                    sector_breakdown,
-                )
-
-                # Generate structured order recommendations via LLM
-                self._generate_order_recommendations(
-                    db,
-                    job_id,
-                    user_id,
-                    position_summaries,
-                    allocation,
-                    concentration,
-                    sector_breakdown,
-                    current_prices,
+                if mode != "single":
+                    allocation, concentration, sector_breakdown = (
+                        self._build_portfolio_data(holdings, current_prices)
+                    )
+                else:
+                    allocation, concentration, sector_breakdown = (
+                        self._build_single_ticker_data(
+                            tickers[0], holdings, current_prices
+                        )
+                    )
+                logger.info(
+                    "Job %s: built %s allocation data (%d entries)",
+                    job_id, mode, len(allocation),
                 )
             except Exception:
-                logger.exception("Portfolio synthesis failed for job %s", job_id)
+                logger.exception(
+                    "Job %s: failed to build allocation data", job_id
+                )
+                allocation, concentration, sector_breakdown = [], {}, []
 
-            # Sector-gap suggestions
-            try:
-                generate_suggestions(db, job_id, user_id, holdings, current_prices=current_prices)
-            except Exception:
-                logger.exception("Suggestion generation failed for job %s", job_id)
+            # Portfolio insight and sector-gap suggestions (portfolio mode only)
+            if mode != "single":
+                try:
+                    self._generate_portfolio_insight(
+                        db,
+                        job_id,
+                        user_id,
+                        tickers,
+                        holdings,
+                        position_summaries,
+                        allocation,
+                        concentration,
+                        sector_breakdown,
+                    )
+                    logger.info(
+                        "Job %s: portfolio insight generated", job_id
+                    )
+                except Exception:
+                    logger.exception(
+                        "Portfolio insight generation failed for job %s",
+                        job_id,
+                    )
+
+                # Sector-gap suggestions
+                try:
+                    generate_suggestions(
+                        db, job_id, user_id, holdings,
+                        current_prices=current_prices,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Suggestion generation failed for job %s", job_id
+                    )
+
+            # Generate structured order recommendations (ALL modes)
+            successful_summaries = [
+                ps for ps in position_summaries
+                if ps.get("signal") and ps["signal"] != "ERROR"
+            ]
+            if successful_summaries:
+                logger.info(
+                    "Job %s: generating recommendations for %d positions "
+                    "(mode=%s, signals=%s)",
+                    job_id,
+                    len(successful_summaries),
+                    mode,
+                    [f"{ps['ticker']}={ps['signal']}" for ps in successful_summaries],
+                )
+                try:
+                    self._generate_order_recommendations(
+                        db,
+                        job_id,
+                        user_id,
+                        successful_summaries,
+                        allocation,
+                        concentration,
+                        sector_breakdown,
+                        current_prices,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Recommendation generation failed for job %s", job_id
+                    )
+            else:
+                logger.warning(
+                    "Job %s: no successful position summaries; "
+                    "skipping recommendation generation",
+                    job_id,
+                )
 
         # Mark complete (unless cancelled during synthesis)
         if not self._is_cancelled(job_id):
@@ -629,70 +686,78 @@ class AnalysisRunner:
     ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
         """Compute allocation, concentration, and sector breakdown.
 
-        Uses current prices where available, falling back to buy_price.
-        Returns (allocation, concentration, sector_breakdown).
+        Delegates to the shared helper in portfolio.py to avoid duplicating
+        the weight/HHI/sector calculation logic.
         """
-        # Compute position values
-        entries: list[dict[str, Any]] = []
-        total_value = 0.0
-        for h in holdings:
-            price = current_prices.get(h.ticker.upper())
-            if price is not None:
-                market_value = h.shares * price
-            else:
-                market_value = h.shares * h.buy_price
-                price = None
-            cost_basis = h.shares * h.buy_price
-            pnl = (market_value - cost_basis) if market_value else None
-            pnl_pct = (pnl / cost_basis) if pnl is not None and cost_basis > 0 else None
-            total_value += market_value
-            entries.append({
-                "ticker": h.ticker,
-                "shares": h.shares,
-                "buy_price": h.buy_price,
-                "current_price": price,
-                "market_value": round(market_value, 2),
-                "cost_basis": round(cost_basis, 2),
-                "weight": 0.0,  # filled below
-                "pnl": round(pnl, 2) if pnl is not None else None,
-                "pnl_pct": round(pnl_pct, 6) if pnl_pct is not None else None,
-            })
+        return compute_allocation_concentration_sectors(holdings, current_prices)
 
-        # Weights
-        if total_value > 0:
-            for e in entries:
-                e["weight"] = round(e["market_value"] / total_value, 6)
+    def _build_single_ticker_data(
+        self,
+        ticker: str,
+        holdings: list[Holding],
+        current_prices: dict[str, float],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+        """Build minimal allocation/concentration/sector data for a single ticker.
 
-        # Concentration
-        weights = [e["weight"] for e in entries if e["weight"] > 0]
-        sorted_w = sorted(weights, reverse=True)
-        hhi = sum(w * w for w in weights) * 10000 if weights else 0
-        max_ticker = ""
-        for e in entries:
-            if sorted_w and e["weight"] == sorted_w[0]:
-                max_ticker = e["ticker"]
-                break
-        concentration = {
-            "hhi": round(hhi, 2),
-            "top3_weight": round(sum(sorted_w[:3]), 6),
-            "top5_weight": round(sum(sorted_w[:5]), 6),
-            "max_position_weight": round(sorted_w[0], 6) if sorted_w else 0,
-            "max_position_ticker": max_ticker,
-        }
+        This allows the recommendation generator to work for single-ticker
+        analyses without requiring a full portfolio synthesis.
+        """
+        ticker_upper = ticker.upper()
 
-        # Sector breakdown
-        sector_map: dict[str, dict[str, Any]] = {}
-        for e in entries:
-            sector = get_sector(e["ticker"])
-            if sector not in sector_map:
-                sector_map[sector] = {"sector": sector, "weight": 0.0, "tickers": []}
-            sector_map[sector]["weight"] += e["weight"]
-            sector_map[sector]["tickers"].append(e["ticker"])
-        sector_breakdown = sorted(
-            sector_map.values(), key=lambda s: s["weight"], reverse=True
+        # Find the matching holding (if any -- single mode can analyse
+        # tickers not in the portfolio)
+        holding = next(
+            (h for h in holdings if h.ticker.upper() == ticker_upper), None
         )
 
-        return entries, concentration, sector_breakdown
+        price = current_prices.get(ticker_upper)
+
+        if holding:
+            shares = holding.shares
+            buy_price = holding.buy_price
+            cost_basis = shares * buy_price
+            market_value = shares * price if price else cost_basis
+            pnl = (market_value - cost_basis) if price else None
+            pnl_pct = (pnl / cost_basis) if pnl is not None and cost_basis > 0 else None
+        else:
+            shares = 0
+            buy_price = price or 0
+            cost_basis = 0
+            market_value = 0
+            pnl = None
+            pnl_pct = None
+
+        allocation = [
+            {
+                "ticker": ticker_upper,
+                "shares": shares,
+                "buy_price": buy_price,
+                "current_price": price,
+                "cost_basis": cost_basis,
+                "market_value": market_value,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "weight": 1.0,  # Single ticker = 100% of analysis scope
+            }
+        ]
+
+        sector = get_sector(ticker_upper)
+        concentration = {
+            "hhi": 10000,  # Single position = max concentration
+            "top3_weight": 1.0,
+            "top5_weight": 1.0,
+            "max_position_ticker": ticker_upper,
+            "max_position_weight": 1.0,
+        }
+        sector_breakdown = [
+            {
+                "sector": sector,
+                "weight": 1.0,
+                "tickers": [ticker_upper],
+            }
+        ]
+
+        return allocation, concentration, sector_breakdown
 
     # ------------------------------------------------------------------
     # Portfolio insight (stored in DB)
@@ -861,6 +926,14 @@ class AnalysisRunner:
         current_prices: dict[str, float],
     ) -> None:
         """Call recommendation_generator and store results."""
+        logger.info(
+            "Job %s: calling generate_recommendations with %d summaries, "
+            "%d allocation entries, prices for %s",
+            job_id,
+            len(position_summaries),
+            len(allocation),
+            list(current_prices.keys())[:10],
+        )
         recs = generate_recommendations(
             position_summaries=position_summaries,
             allocation=allocation,
@@ -933,12 +1006,16 @@ class AnalysisRunner:
 # ---------------------------------------------------------------------------
 
 _runner: AnalysisRunner | None = None
+_runner_lock = threading.Lock()
 
 
 def get_runner() -> AnalysisRunner:
     global _runner
     if _runner is None:
-        _runner = AnalysisRunner()
+        with _runner_lock:
+            # Double-checked locking to avoid race condition
+            if _runner is None:
+                _runner = AnalysisRunner()
     return _runner
 
 

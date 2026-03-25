@@ -98,8 +98,16 @@ def _is_cache_fresh(cached: PriceCache) -> bool:
 
 
 def _store_cache(db: Session, ticker: str, price_data: dict) -> PriceCache:
-    """Store a price entry in the cache."""
+    """Store a price entry in the cache, replacing any existing row for the ticker.
+
+    Uses an upsert pattern (delete old + insert new) so the cache stores at
+    most one row per ticker, preventing unbounded growth between restarts.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    # Remove existing cache entries for this ticker before inserting
+    db.query(PriceCache).filter(PriceCache.ticker == ticker).delete()
+
     entry = PriceCache(
         id=str(uuid.uuid4()),
         ticker=ticker,
@@ -164,8 +172,26 @@ def _fetch_from_alpaca(ticker: str) -> dict | None:
         close_price = bar.close if bar else None
         volume = int(bar.volume) if bar else None
 
-        # Calculate change from previous close
-        prev_close = close_price  # Approximate: use bar close
+        # Fetch previous day's close using daily bars (limit=2) for
+        # accurate daily change calculation instead of comparing mid
+        # price against the same bar's close (which is always ~zero).
+        prev_close = None
+        try:
+            from datetime import timedelta
+            bars_request = StockBarsRequest(
+                symbol_or_symbols=ticker,
+                timeframe=TimeFrame.Day,
+                limit=2,
+            )
+            daily_bars = client.get_stock_bars(bars_request)
+            bar_list = daily_bars.data.get(ticker, []) if hasattr(daily_bars, "data") else []
+            if len(bar_list) >= 2:
+                prev_close = bar_list[-2].close
+            elif len(bar_list) == 1:
+                prev_close = bar_list[0].close
+        except Exception:
+            logger.debug("Could not fetch daily bars for %s; change will be None", ticker)
+
         change = (mid_price - prev_close) if prev_close and mid_price else None
         change_pct = (change / prev_close * 100) if prev_close and change else None
 

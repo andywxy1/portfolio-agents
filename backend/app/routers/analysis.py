@@ -10,6 +10,7 @@ GET    /api/analysis/jobs/:id/stream -> SSE stream for live progress
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -28,8 +29,10 @@ from app.schemas.analysis import (
     AnalysisJobConfig,
     AnalysisJobListItem,
     AnalysisJobResponse,
+    InvestmentDebate,
     PositionAnalysisResponse,
     PositionAnalysisSummary,
+    RiskDebate,
     StartAnalysisRequest,
     StartAnalysisResponse,
 )
@@ -318,8 +321,18 @@ async def stream_analysis(job_id: str) -> StreamingResponse:
         keepalive_interval = 15  # seconds between keepalive comments
         cycles_per_keepalive = int(keepalive_interval / 1.0)  # 1s per cycle
         cycle_count = 0
+        wall_clock_start = time.monotonic()
+        wall_clock_timeout = 30 * 60  # 30 minutes
 
         while True:
+            # P0: Guard against infinite hang if runner crashes without
+            # marking the stream complete.
+            if (time.monotonic() - wall_clock_start) >= wall_clock_timeout:
+                yield (
+                    "event: done\n"
+                    "data: " + json.dumps({"error": "Stream timed out after 30 minutes"}) + "\n\n"
+                )
+                return
             # Drain all available events
             had_events = False
             for event in stream.subscribe(last_id):
@@ -512,8 +525,23 @@ def _position_analysis_to_response(pa: PositionAnalysis) -> PositionAnalysisResp
         except (json.JSONDecodeError, TypeError):
             return None
 
-    investment_debate = _parse_json(pa.investment_debate)
-    risk_debate = _parse_json(pa.risk_debate)
+    investment_debate_raw = _parse_json(pa.investment_debate)
+    investment_debate = None
+    if investment_debate_raw is not None:
+        try:
+            investment_debate = InvestmentDebate(**investment_debate_raw)
+        except Exception:
+            # Fallback: schema mismatch, pass raw dict through
+            investment_debate = investment_debate_raw  # type: ignore[assignment]
+
+    risk_debate_raw = _parse_json(pa.risk_debate)
+    risk_debate = None
+    if risk_debate_raw is not None:
+        try:
+            risk_debate = RiskDebate(**risk_debate_raw)
+        except Exception:
+            # Fallback: schema mismatch, pass raw dict through
+            risk_debate = risk_debate_raw  # type: ignore[assignment]
 
     return PositionAnalysisResponse(
         id=pa.id,
@@ -555,7 +583,16 @@ def _insight_to_response(insight: PortfolioInsight) -> PortfolioInsightResponse:
     sector_breakdown = [SectorEntry(**s) for s in sector_raw] if sector_raw else None
 
     concentration_raw = _parse_json(insight.concentration_metrics) or {}
-    concentration = ConcentrationMetrics(**concentration_raw)
+    try:
+        concentration = ConcentrationMetrics(**concentration_raw)
+    except Exception:
+        concentration = ConcentrationMetrics(
+            hhi=0.0,
+            top3_weight=0.0,
+            top5_weight=0.0,
+            max_position_weight=0.0,
+            max_position_ticker="",
+        )
 
     return PortfolioInsightResponse(
         id=insight.id,

@@ -38,6 +38,9 @@ import {
 import { DepthSelector, estimateTime, estimateAutoBreakdown } from '../../components/DepthSelector';
 import type { HoldingWithPrice, AnalysisMode, AnalysisRequestDepth } from '../../types';
 
+// Maximum retries for 409 conflict (Fix #5)
+const MAX_409_RETRIES = 1;
+
 export default function Holdings() {
   usePageTitle('Holdings');
   const navigate = useNavigate();
@@ -54,7 +57,7 @@ export default function Holdings() {
 
   // Price polling (Item 1)
   const tickers = useMemo(() => (holdings ?? []).map(h => h.ticker), [holdings]);
-  // Batch price polling — keeps React Query cache fresh, triggers re-render via holdings invalidation
+  // Batch price polling -- keeps React Query cache fresh, triggers re-render via holdings invalidation
   useBatchPrices(tickers, tickers.length > 0);
 
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -70,9 +73,20 @@ export default function Holdings() {
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('portfolio');
   const [analysisDropdownOpen, setAnalysisDropdownOpen] = useState(false);
   const analysisDropdownRef = useRef<HTMLDivElement>(null);
-  const [selectedDepth, setSelectedDepth] = useState<AnalysisRequestDepth>('auto');
+
+  // Fix #4: Separate depth state for portfolio and single-ticker
+  const [portfolioDepth, setPortfolioDepth] = useState<AnalysisRequestDepth>('auto');
+  const [singleTickerDepth, setSingleTickerDepth] = useState<AnalysisRequestDepth>('auto');
+
   const [singleTickerPopover, setSingleTickerPopover] = useState<string | null>(null);
   const singleTickerPopoverRef = useRef<HTMLDivElement>(null);
+
+  // Fix #4: Reset single-ticker depth each time a popover opens
+  useEffect(() => {
+    if (singleTickerPopover) {
+      setSingleTickerDepth('auto');
+    }
+  }, [singleTickerPopover]);
 
   // Ticker validation (Item 11)
   const [tickerInput, setTickerInput] = useState('');
@@ -221,13 +235,17 @@ export default function Holdings() {
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
   }, []);
 
+  // Fix #2: Track newly added tickers to show loading spinner
+  const [fetchingPriceTickers, setFetchingPriceTickers] = useState<Set<string>>(new Set());
+
   const handleAdd = useCallback(() => {
     if (!newRow.ticker || !newRow.shares || !newRow.buy_price) return;
     // Block if ticker is invalid (Item 11)
     if (tickerValidation && !tickerValidation.valid) return;
+    const upperTicker = newRow.ticker.toUpperCase();
     createMutation.mutate(
       {
-        ticker: newRow.ticker.toUpperCase(),
+        ticker: upperTicker,
         shares: Number(newRow.shares),
         buy_price: Number(newRow.buy_price),
         notes: newRow.notes || null,
@@ -237,7 +255,9 @@ export default function Holdings() {
           setShowAddRow(false);
           setNewRow({ ticker: '', shares: '', buy_price: '', notes: '' });
           setTickerInput('');
-          toast.success(`${newRow.ticker.toUpperCase()} added to holdings`);
+          // Fix #2: Mark this ticker as fetching price
+          setFetchingPriceTickers(prev => new Set(prev).add(upperTicker));
+          toast.success(`${upperTicker} added to holdings`);
         },
         onError: (err) => {
           toast.error(`Failed to add holding: ${err.message}`);
@@ -245,6 +265,21 @@ export default function Holdings() {
       }
     );
   }, [newRow, createMutation, toast, tickerValidation]);
+
+  // Fix #2: Clear fetching state once the price arrives
+  useEffect(() => {
+    if (fetchingPriceTickers.size === 0 || !holdings) return;
+    const stillFetching = new Set<string>();
+    for (const t of fetchingPriceTickers) {
+      const h = holdings.find(h => h.ticker === t);
+      if (h && h.current_price == null) {
+        stillFetching.add(t);
+      }
+    }
+    if (stillFetching.size !== fetchingPriceTickers.size) {
+      setFetchingPriceTickers(stillFetching);
+    }
+  }, [holdings, fetchingPriceTickers]);
 
   const handleDelete = useCallback((id: string) => {
     const ticker = holdings?.find(h => h.id === id)?.ticker ?? 'Holding';
@@ -259,15 +294,20 @@ export default function Holdings() {
     });
   }, [deleteMutation, holdings, toast]);
 
+  // Fix #5: Track 409 retry count per invocation
+  const retryCountRef = useRef(0);
+
   const handleStartAnalysis = useCallback((mode: AnalysisMode = 'portfolio', ticker?: string, depth?: AnalysisRequestDepth) => {
     setAnalysisConfirmOpen(false);
     setAnalysisDropdownOpen(false);
     setSingleTickerPopover(null);
-    const depthToSend = depth ?? selectedDepth;
+    // Fix #4: Use the correct depth state depending on mode
+    const depthToSend = depth ?? (mode === 'single' ? singleTickerDepth : portfolioDepth);
     analysisMutation.mutate(
       { mode, ...(ticker ? { ticker } : {}), depth: depthToSend },
       {
         onSuccess: (result) => {
+          retryCountRef.current = 0;
           setActiveAnalysisJob(result.job_id);
           toast.info(`Analysis started for ${result.total_tickers} position${result.total_tickers !== 1 ? 's' : ''}`);
           navigate(`/analysis/progress/${result.job_id}`);
@@ -275,6 +315,12 @@ export default function Holdings() {
         onError: (err) => {
           if (err instanceof ApiRequestError && err.status === 409) {
             const activeJobId = err.details.active_job_id as string | undefined;
+            // Fix #5: Only allow one auto-retry after cancel
+            if (retryCountRef.current >= MAX_409_RETRIES) {
+              retryCountRef.current = 0;
+              toast.error('Still blocked -- try again manually after the current analysis finishes.');
+              return;
+            }
             toast.warning('Analysis already running', {
               action: activeJobId ? {
                 label: 'Cancel it',
@@ -282,7 +328,7 @@ export default function Holdings() {
                   cancelMutation.mutate(activeJobId, {
                     onSuccess: () => {
                       toast.info('Previous analysis cancelled. Retrying...');
-                      // Retry after a short delay to let the backend settle
+                      retryCountRef.current += 1;
                       setTimeout(() => handleStartAnalysis(mode, ticker, depthToSend), 500);
                     },
                     onError: (cancelErr) => {
@@ -298,7 +344,7 @@ export default function Holdings() {
         },
       }
     );
-  }, [analysisMutation, cancelMutation, navigate, toast, selectedDepth]);
+  }, [analysisMutation, cancelMutation, navigate, toast, portfolioDepth, singleTickerDepth]);
 
   // Check for any stale prices (Item 16)
   const hasStalePrice = useMemo(
@@ -306,16 +352,23 @@ export default function Holdings() {
     [holdings]
   );
 
+  // Fix #6: Extract edit state checks into stable callbacks to reduce column dependency array
+  const isEditing = useCallback((id: string) => editingId === id, [editingId]);
+  const getEditValue = useCallback((field: string) => editValues[field] ?? '', [editValues]);
+  const isSaving = useCallback((id: string) => savingIndicator === id, [savingIndicator]);
+  const isFetchingPrice = useCallback((ticker: string) => fetchingPriceTickers.has(ticker), [fetchingPriceTickers]);
+
+  // Fix #6: Stabilize columns -- only depend on identity-stable callbacks, not the entire edit state
   const columns = useMemo<ColumnDef<HoldingWithPrice>[]>(() => [
     {
       accessorKey: 'ticker',
       header: 'Ticker',
       cell: ({ row }) => {
-        if (editingId === row.original.id) {
+        if (isEditing(row.original.id)) {
           return (
             <input
               className="w-20 rounded border border-gray-300 px-2 py-1 text-sm font-semibold uppercase"
-              value={editValues.ticker}
+              value={getEditValue('ticker')}
               onChange={e => handleEditChange('ticker', e.target.value, row.original.id)}
             />
           );
@@ -327,12 +380,12 @@ export default function Holdings() {
       accessorKey: 'shares',
       header: 'Shares',
       cell: ({ row }) => {
-        if (editingId === row.original.id) {
+        if (isEditing(row.original.id)) {
           return (
             <input
               type="number"
               className="w-24 rounded border border-gray-300 px-2 py-1 text-sm text-right"
-              value={editValues.shares}
+              value={getEditValue('shares')}
               onChange={e => handleEditChange('shares', e.target.value, row.original.id)}
             />
           );
@@ -344,13 +397,13 @@ export default function Holdings() {
       accessorKey: 'buy_price',
       header: 'Buy Price',
       cell: ({ row }) => {
-        if (editingId === row.original.id) {
+        if (isEditing(row.original.id)) {
           return (
             <input
               type="number"
               step="0.01"
               className="w-28 rounded border border-gray-300 px-2 py-1 text-sm text-right"
-              value={editValues.buy_price}
+              value={getEditValue('buy_price')}
               onChange={e => handleEditChange('buy_price', e.target.value, row.original.id)}
             />
           );
@@ -363,6 +416,15 @@ export default function Holdings() {
       header: 'Current Price',
       cell: ({ row }) => {
         const h = row.original;
+        // Fix #2: Show loading spinner for newly-added tickers
+        if (h.current_price == null && isFetchingPrice(h.ticker)) {
+          return (
+            <div className="text-right flex items-center justify-end gap-1.5">
+              <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500" />
+              <span className="text-xs text-gray-400">fetching price...</span>
+            </div>
+          );
+        }
         // Item 16: graceful price failures
         if (h.current_price == null) {
           return (
@@ -418,14 +480,38 @@ export default function Holdings() {
         </span>
       ),
     },
+    // Fix #1: Notes column
+    {
+      accessorKey: 'notes',
+      header: 'Notes',
+      cell: ({ row }) => {
+        if (isEditing(row.original.id)) {
+          return (
+            <input
+              className="w-32 rounded border border-gray-300 px-2 py-1 text-sm"
+              value={getEditValue('notes')}
+              onChange={e => handleEditChange('notes', e.target.value, row.original.id)}
+              placeholder="Add note..."
+            />
+          );
+        }
+        const notes = row.original.notes;
+        if (!notes) return <span className="text-gray-300">--</span>;
+        return (
+          <span className="text-sm text-gray-600 block truncate max-w-[10rem]" title={notes}>
+            {notes}
+          </span>
+        );
+      },
+    },
     {
       id: 'actions',
       header: '',
       cell: ({ row }) => {
-        if (editingId === row.original.id) {
+        if (isEditing(row.original.id)) {
           return (
             <div className="flex items-center gap-1">
-              {savingIndicator === row.original.id ? (
+              {isSaving(row.original.id) ? (
                 <span className="text-xs text-emerald-600 font-medium">Saved</span>
               ) : (
                 <span className="text-xs text-gray-400">Auto-saves</span>
@@ -450,9 +536,10 @@ export default function Holdings() {
               {singleTickerPopover === row.original.ticker && (
                 <div className="absolute right-0 top-full z-30 mt-1 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg">
                   <p className="text-xs font-semibold text-gray-900 mb-2">Analyze {row.original.ticker}</p>
-                  <DepthSelector value={selectedDepth} onChange={(d) => { setSelectedDepth(d); }} compact />
+                  {/* Fix #4: Use singleTickerDepth state */}
+                  <DepthSelector value={singleTickerDepth} onChange={setSingleTickerDepth} compact />
                   <button
-                    onClick={() => handleStartAnalysis('single', row.original.ticker)}
+                    onClick={() => handleStartAnalysis('single', row.original.ticker, singleTickerDepth)}
                     disabled={analysisMutation.isPending}
                     className="mt-2 w-full rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
                   >
@@ -467,7 +554,7 @@ export default function Holdings() {
         );
       },
     },
-  ], [editingId, editValues, savingIndicator, handleEditChange, cancelEdit, startEdit, handleStartAnalysis, analysisMutation.isPending, singleTickerPopover, selectedDepth]);
+  ], [isEditing, getEditValue, isSaving, isFetchingPrice, handleEditChange, cancelEdit, startEdit, handleStartAnalysis, analysisMutation.isPending, singleTickerPopover, singleTickerDepth]);
 
   const table = useReactTable({
     data: holdings ?? [],
@@ -489,7 +576,7 @@ export default function Holdings() {
           <p className="mt-1 text-sm text-gray-500">Manage your portfolio positions</p>
         </div>
       </div>
-      <SkeletonTable rows={5} columns={8} />
+      <SkeletonTable rows={5} columns={9} />
     </div>
   );
 
@@ -631,147 +718,193 @@ export default function Holdings() {
         />
       </div>
 
-      {/* Import drag-drop zone (Item 2) */}
-      <div
-        className={`rounded-xl border-2 border-dashed p-4 text-center text-sm transition-colors ${
-          dragOver ? 'border-emerald-400 bg-emerald-50' : 'border-gray-200 bg-gray-50/50'
-        } ${holdings && holdings.length > 0 ? 'hidden' : ''}`}
-        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragOver(false);
-          const file = e.dataTransfer.files[0];
-          if (file && file.name.endsWith('.csv')) handleImportFile(file);
-          else toast.warning('Please drop a CSV file');
-        }}
-      >
-        <p className="text-gray-500">Drag and drop a CSV file here to import holdings</p>
-      </div>
-
       {/* Table */}
       {(!holdings || holdings.length === 0) && !showAddRow ? (
-        <EmptyState
-          title="No holdings yet"
-          description="Add your first position above, or import a CSV."
-          action={{ label: 'Add Position', onClick: () => setShowAddRow(true) }}
-        />
+        <>
+          {/* Import drag-drop zone (Item 2) -- full size when empty */}
+          <div
+            className={`rounded-xl border-2 border-dashed p-8 text-center text-sm transition-colors ${
+              dragOver ? 'border-emerald-400 bg-emerald-50' : 'border-gray-200 bg-gray-50/50'
+            }`}
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              const file = e.dataTransfer.files[0];
+              if (file && file.name.endsWith('.csv')) handleImportFile(file);
+              else toast.warning('Please drop a CSV file');
+            }}
+          >
+            <p className="text-gray-500">Drag and drop a CSV file here to import holdings</p>
+          </div>
+          <EmptyState
+            title="No holdings yet"
+            description="Add your first position above, or import a CSV."
+            action={{ label: 'Add Position', onClick: () => setShowAddRow(true) }}
+          />
+        </>
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              {table.getHeaderGroups().map(headerGroup => (
-                <tr key={headerGroup.id}>
-                  {headerGroup.headers.map(header => (
-                    <th
-                      key={header.id}
-                      className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700"
-                      onClick={header.column.getToggleSortingHandler()}
-                    >
+        <>
+          <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+            <table className="min-w-full divide-y divide-gray-200">
+              {/* Fix #7: aria-sort on sorted column headers, button elements for sort triggers */}
+              <thead className="bg-gray-50">
+                {table.getHeaderGroups().map(headerGroup => (
+                  <tr key={headerGroup.id}>
+                    {headerGroup.headers.map(header => {
+                      const sorted = header.column.getIsSorted();
+                      const ariaSort: 'ascending' | 'descending' | 'none' =
+                        sorted === 'asc' ? 'ascending' : sorted === 'desc' ? 'descending' : 'none';
+                      const canSort = header.column.getCanSort();
+                      return (
+                        <th
+                          key={header.id}
+                          className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider"
+                          aria-sort={canSort ? ariaSort : undefined}
+                        >
+                          {canSort ? (
+                            <button
+                              type="button"
+                              className="flex items-center gap-1 hover:text-gray-700 select-none cursor-pointer"
+                              onClick={header.column.getToggleSortingHandler()}
+                            >
+                              {flexRender(header.column.columnDef.header, header.getContext())}
+                              {sorted === 'asc' && <span className="text-gray-400">^</span>}
+                              {sorted === 'desc' && <span className="text-gray-400">v</span>}
+                            </button>
+                          ) : (
+                            flexRender(header.column.columnDef.header, header.getContext())
+                          )}
+                        </th>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {showAddRow && (
+                  <tr className="bg-blue-50/50">
+                    <td className="px-4 py-3">
                       <div className="flex items-center gap-1">
-                        {flexRender(header.column.columnDef.header, header.getContext())}
-                        {header.column.getIsSorted() === 'asc' && <span className="text-gray-400">^</span>}
-                        {header.column.getIsSorted() === 'desc' && <span className="text-gray-400">v</span>}
+                        <input
+                          placeholder="AAPL"
+                          className="w-20 rounded border border-gray-300 px-2 py-1 text-sm font-semibold uppercase"
+                          value={newRow.ticker}
+                          onChange={e => {
+                            const val = e.target.value;
+                            setNewRow(r => ({ ...r, ticker: val }));
+                            setTickerInput(val);
+                          }}
+                          onKeyDown={e => { if (e.key === 'Enter') handleAdd(); }}
+                          autoFocus
+                        />
+                        {/* Ticker validation indicator (Item 11) */}
+                        {tickerInput.length > 0 && !validatingTicker && tickerValidation && (
+                          tickerValidation.valid ? (
+                            <svg className="h-4 w-4 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                            </svg>
+                          ) : (
+                            <svg className="h-4 w-4 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          )
+                        )}
+                        {validatingTicker && tickerInput.length > 0 && (
+                          <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500" />
+                        )}
                       </div>
-                    </th>
-                  ))}
-                </tr>
-              ))}
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {showAddRow && (
-                <tr className="bg-blue-50/50">
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-1">
-                      <input
-                        placeholder="AAPL"
-                        className="w-20 rounded border border-gray-300 px-2 py-1 text-sm font-semibold uppercase"
-                        value={newRow.ticker}
-                        onChange={e => {
-                          const val = e.target.value;
-                          setNewRow(r => ({ ...r, ticker: val }));
-                          setTickerInput(val);
-                        }}
-                        onKeyDown={e => { if (e.key === 'Enter') handleAdd(); }}
-                        autoFocus
-                      />
-                      {/* Ticker validation indicator (Item 11) */}
-                      {tickerInput.length > 0 && !validatingTicker && tickerValidation && (
-                        tickerValidation.valid ? (
-                          <svg className="h-4 w-4 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                          </svg>
-                        ) : (
-                          <svg className="h-4 w-4 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        )
-                      )}
-                      {validatingTicker && tickerInput.length > 0 && (
-                        <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500" />
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <input
-                      type="number"
-                      placeholder="100"
-                      className="w-24 rounded border border-gray-300 px-2 py-1 text-sm text-right"
-                      value={newRow.shares}
-                      onChange={e => setNewRow(r => ({ ...r, shares: e.target.value }))}
-                      onKeyDown={e => { if (e.key === 'Enter') handleAdd(); }}
-                    />
-                  </td>
-                  <td className="px-4 py-3">
-                    <input
-                      type="number"
-                      step="0.01"
-                      placeholder="150.00"
-                      className="w-28 rounded border border-gray-300 px-2 py-1 text-sm text-right"
-                      value={newRow.buy_price}
-                      onChange={e => setNewRow(r => ({ ...r, buy_price: e.target.value }))}
-                      onKeyDown={e => { if (e.key === 'Enter') handleAdd(); }}
-                    />
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-400">--</td>
-                  <td className="px-4 py-3 text-sm text-gray-400">--</td>
-                  <td className="px-4 py-3 text-sm text-gray-400">--</td>
-                  <td className="px-4 py-3 text-sm text-gray-400">--</td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-1">
-                      <button
-                        onClick={handleAdd}
-                        disabled={createMutation.isPending || (tickerValidation != null && !tickerValidation.valid)}
-                        className="rounded px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
-                      >
-                        {createMutation.isPending ? 'Adding...' : 'Add'}
-                      </button>
-                      <button
-                        onClick={() => {
-                          setShowAddRow(false);
-                          setNewRow({ ticker: '', shares: '', buy_price: '', notes: '' });
-                          setTickerInput('');
-                        }}
-                        className="rounded px-2 py-1 text-xs font-medium text-gray-500 hover:bg-gray-100"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              )}
-              {table.getRowModel().rows.map(row => (
-                <tr key={row.id} className="hover:bg-gray-50 transition-colors">
-                  {row.getVisibleCells().map(cell => (
-                    <td key={cell.id} className="px-4 py-3 text-sm">
-                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                    <td className="px-4 py-3">
+                      <input
+                        type="number"
+                        placeholder="100"
+                        className="w-24 rounded border border-gray-300 px-2 py-1 text-sm text-right"
+                        value={newRow.shares}
+                        onChange={e => setNewRow(r => ({ ...r, shares: e.target.value }))}
+                        onKeyDown={e => { if (e.key === 'Enter') handleAdd(); }}
+                      />
+                    </td>
+                    <td className="px-4 py-3">
+                      <input
+                        type="number"
+                        step="0.01"
+                        placeholder="150.00"
+                        className="w-28 rounded border border-gray-300 px-2 py-1 text-sm text-right"
+                        value={newRow.buy_price}
+                        onChange={e => setNewRow(r => ({ ...r, buy_price: e.target.value }))}
+                        onKeyDown={e => { if (e.key === 'Enter') handleAdd(); }}
+                      />
+                    </td>
+                    <td className="px-4 py-3 text-sm text-gray-400">--</td>
+                    <td className="px-4 py-3 text-sm text-gray-400">--</td>
+                    <td className="px-4 py-3 text-sm text-gray-400">--</td>
+                    <td className="px-4 py-3 text-sm text-gray-400">--</td>
+                    {/* Fix #1: Notes input in add row form */}
+                    <td className="px-4 py-3">
+                      <input
+                        placeholder="Notes..."
+                        className="w-32 rounded border border-gray-300 px-2 py-1 text-sm"
+                        value={newRow.notes}
+                        onChange={e => setNewRow(r => ({ ...r, notes: e.target.value }))}
+                        onKeyDown={e => { if (e.key === 'Enter') handleAdd(); }}
+                      />
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-1">
+                        <button
+                          onClick={handleAdd}
+                          disabled={createMutation.isPending || (tickerValidation != null && !tickerValidation.valid)}
+                          className="rounded px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                        >
+                          {createMutation.isPending ? 'Adding...' : 'Add'}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShowAddRow(false);
+                            setNewRow({ ticker: '', shares: '', buy_price: '', notes: '' });
+                            setTickerInput('');
+                          }}
+                          className="rounded px-2 py-1 text-xs font-medium text-gray-500 hover:bg-gray-100"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                {table.getRowModel().rows.map(row => (
+                  <tr key={row.id} className="hover:bg-gray-50 transition-colors">
+                    {row.getVisibleCells().map(cell => (
+                      <td key={cell.id} className="px-4 py-3 text-sm">
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Fix #3: Always-visible CSV drop zone when holdings exist (subtle/compact) */}
+          <div
+            className={`rounded-lg border-2 border-dashed px-4 py-2.5 text-center text-xs transition-colors ${
+              dragOver ? 'border-emerald-400 bg-emerald-50' : 'border-gray-200 bg-gray-50/30'
+            }`}
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              const file = e.dataTransfer.files[0];
+              if (file && file.name.endsWith('.csv')) handleImportFile(file);
+              else toast.warning('Please drop a CSV file');
+            }}
+          >
+            <p className="text-gray-400">Drop CSV to import more holdings</p>
+          </div>
+        </>
       )}
 
       {/* Confirm Dialogs (Item 7) */}
@@ -790,7 +923,7 @@ export default function Holdings() {
         title={analysisMode === 'all_individual' ? 'Analyze All' : 'Analyze Portfolio'}
         confirmLabel="Start Analysis"
         onConfirm={() => handleStartAnalysis(analysisMode)}
-        onCancel={() => { setAnalysisConfirmOpen(false); setSelectedDepth('auto'); }}
+        onCancel={() => { setAnalysisConfirmOpen(false); setPortfolioDepth('auto'); }}
       >
         <div className="space-y-4">
           <p className="text-sm text-gray-600">
@@ -799,15 +932,16 @@ export default function Holdings() {
 
           <div>
             <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-2">Analysis Depth</label>
-            <DepthSelector value={selectedDepth} onChange={setSelectedDepth} />
+            {/* Fix #4: Use portfolioDepth for the main dialog */}
+            <DepthSelector value={portfolioDepth} onChange={setPortfolioDepth} />
           </div>
 
           <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2.5 text-xs text-gray-600 space-y-1">
             <div className="flex justify-between">
               <span>Estimated time</span>
-              <span className="font-semibold text-gray-900">{estimateTime(holdings?.length ?? 0, selectedDepth)}</span>
+              <span className="font-semibold text-gray-900">{estimateTime(holdings?.length ?? 0, portfolioDepth)}</span>
             </div>
-            {selectedDepth === 'auto' && (holdings?.length ?? 0) > 0 && (() => {
+            {portfolioDepth === 'auto' && (holdings?.length ?? 0) > 0 && (() => {
               const breakdown = estimateAutoBreakdown(holdings?.length ?? 0);
               return (
                 <div className="flex justify-between text-gray-500">

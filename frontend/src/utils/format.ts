@@ -34,9 +34,23 @@ export function formatCompactCurrency(value: number | null | undefined): string 
   return compactCurrencyFormatter.format(value);
 }
 
+/**
+ * Format a decimal ratio as a percentage string.
+ * This auto-multiplies: 0.15 -> "15.00%".
+ * Use `formatPercentRaw` when the value is already in percentage form (e.g. 15 -> "15.00%").
+ */
 export function formatPercent(value: number | null | undefined): string {
   if (value == null) return '--';
   return percentFormatter.format(value);
+}
+
+/**
+ * Fix #15: Format a value that is already in percentage form (e.g. 15.5 -> "15.50%").
+ * Does NOT auto-multiply. Use this when the value is already expressed as a percent.
+ */
+export function formatPercentRaw(value: number | null | undefined): string {
+  if (value == null) return '--';
+  return `${numberFormatter.format(value)}%`;
 }
 
 export function formatNumber(value: number | null | undefined): string {

@@ -53,11 +53,14 @@ interface DepthSelectorProps {
 export function DepthSelector({ value, onChange, compact = false }: DepthSelectorProps) {
   if (compact) {
     return (
-      <div className="flex flex-col gap-1">
+      // Fix #11: Add radiogroup semantics
+      <div className="flex flex-col gap-1" role="radiogroup" aria-label="Analysis depth">
         {DEPTH_OPTIONS.map((opt) => (
           <button
             key={opt.value}
             onClick={() => onChange(opt.value)}
+            role="radio"
+            aria-checked={value === opt.value}
             className={`flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
               value === opt.value
                 ? 'bg-slate-100 ring-1 ring-slate-400'
@@ -76,11 +79,14 @@ export function DepthSelector({ value, onChange, compact = false }: DepthSelecto
   }
 
   return (
-    <div className="grid grid-cols-1 gap-2">
+    // Fix #11: Add radiogroup semantics
+    <div className="grid grid-cols-1 gap-2" role="radiogroup" aria-label="Analysis depth">
       {DEPTH_OPTIONS.map((opt) => (
         <button
           key={opt.value}
           onClick={() => onChange(opt.value)}
+          role="radio"
+          aria-checked={value === opt.value}
           className={`flex items-start gap-3 rounded-lg border p-3 text-left transition-all ${
             value === opt.value
               ? `${opt.colorClass} ring-2 ring-offset-1 ring-slate-400`
@@ -117,6 +123,8 @@ export function estimateTime(tickerCount: number, depth: AnalysisRequestDepth, c
 
 /** Estimate auto depth breakdown */
 export function estimateAutoBreakdown(tickerCount: number): { deep: number; medium: number; light: number } {
+  // Fix #13: Guard against 0 (or negative) tickers producing negative values
+  if (tickerCount <= 0) return { deep: 0, medium: 0, light: 0 };
   // Rough heuristic: top 30% deep, middle 40% medium, bottom 30% light
   const deep = Math.max(1, Math.round(tickerCount * 0.3));
   const light = Math.max(1, Math.round(tickerCount * 0.3));

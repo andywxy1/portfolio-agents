@@ -241,6 +241,93 @@ def _compute_concentration(allocation: list[AllocationEntry]) -> ConcentrationMe
     )
 
 
+def compute_allocation_concentration_sectors(
+    holdings: list[Holding],
+    current_prices: dict[str, float],
+) -> tuple[list[dict], dict, list[dict]]:
+    """Shared helper: compute allocation, concentration, and sector breakdown.
+
+    Used by both the analysis runner (for portfolio insight generation) and
+    the portfolio summary endpoint. Avoids duplicating the weight/HHI/sector
+    calculation logic in two places.
+
+    Parameters
+    ----------
+    holdings : list[Holding]
+        Active holding ORM objects.
+    current_prices : dict[str, float]
+        Mapping of uppercase ticker -> current price. Falls back to buy_price
+        for tickers not present.
+
+    Returns
+    -------
+    (allocation, concentration, sector_breakdown)
+        allocation : list of dicts with ticker, shares, buy_price, current_price,
+            market_value, cost_basis, weight, pnl, pnl_pct
+        concentration : dict with hhi, top3_weight, top5_weight, etc.
+        sector_breakdown : list of dicts with sector, weight, tickers
+    """
+    entries: list[dict] = []
+    total_value = 0.0
+    for h in holdings:
+        price = current_prices.get(h.ticker.upper())
+        if price is not None:
+            market_value = h.shares * price
+        else:
+            market_value = h.shares * h.buy_price
+            price = None
+        cost_basis = h.shares * h.buy_price
+        pnl = (market_value - cost_basis) if market_value else None
+        pnl_pct = (pnl / cost_basis) if pnl is not None and cost_basis > 0 else None
+        total_value += market_value
+        entries.append({
+            "ticker": h.ticker,
+            "shares": h.shares,
+            "buy_price": h.buy_price,
+            "current_price": price,
+            "market_value": round(market_value, 2),
+            "cost_basis": round(cost_basis, 2),
+            "weight": 0.0,
+            "pnl": round(pnl, 2) if pnl is not None else None,
+            "pnl_pct": round(pnl_pct, 6) if pnl_pct is not None else None,
+        })
+
+    if total_value > 0:
+        for e in entries:
+            e["weight"] = round(e["market_value"] / total_value, 6)
+
+    # Concentration (HHI)
+    weights = [e["weight"] for e in entries if e["weight"] > 0]
+    sorted_w = sorted(weights, reverse=True)
+    hhi = sum(w * w for w in weights) * 10000 if weights else 0
+    max_ticker = ""
+    for e in entries:
+        if sorted_w and e["weight"] == sorted_w[0]:
+            max_ticker = e["ticker"]
+            break
+    concentration = {
+        "hhi": round(hhi, 2),
+        "top3_weight": round(sum(sorted_w[:3]), 6),
+        "top5_weight": round(sum(sorted_w[:5]), 6),
+        "max_position_weight": round(sorted_w[0], 6) if sorted_w else 0,
+        "max_position_ticker": max_ticker,
+    }
+
+    # Sector breakdown
+    sector_map: dict[str, dict] = {}
+    for e in entries:
+        sector = get_sector(e["ticker"])
+        if sector not in sector_map:
+            sector_map[sector] = {"sector": sector, "weight": 0.0, "tickers": []}
+        sector_map[sector]["weight"] += e["weight"]
+        sector_map[sector]["tickers"].append(e["ticker"])
+    sector_breakdown = sorted(
+        sector_map.values(), key=lambda s: s["weight"], reverse=True
+    )
+
+    return entries, concentration, sector_breakdown
+
+
 def get_holdings_with_prices(
     db: Session, holdings: list[Holding]
 ) -> list[HoldingWithPrice]:

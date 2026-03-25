@@ -2,6 +2,8 @@
 // Skeleton loading primitives (Item 8)
 // ---------------------------------------------------------------------------
 
+import { useMemo } from 'react';
+
 interface SkeletonProps {
   className?: string;
   style?: React.CSSProperties;
@@ -28,16 +30,29 @@ export function SkeletonCard() {
   );
 }
 
+// Fix #3: Deterministic bar heights based on index instead of Math.random() in render
+const SKELETON_CHART_BAR_COUNT = 8;
+
 export function SkeletonChart() {
+  const barHeights = useMemo(
+    () =>
+      Array.from({ length: SKELETON_CHART_BAR_COUNT }, (_, i) => {
+        // Deterministic pseudo-random pattern based on index
+        const h = 30 + ((i * 37 + 13) % 60);
+        return `${h}%`;
+      }),
+    [],
+  );
+
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-6 space-y-4">
       <Skeleton className="h-4 w-40" />
       <div className="flex items-end gap-2 h-60">
-        {Array.from({ length: 8 }).map((_, i) => (
+        {barHeights.map((height, i) => (
           <Skeleton
             key={i}
             className="flex-1"
-            style={{ height: `${30 + Math.random() * 60}%` } as React.CSSProperties}
+            style={{ height } as React.CSSProperties}
           />
         ))}
       </div>
