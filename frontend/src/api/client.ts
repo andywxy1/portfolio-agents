@@ -99,8 +99,29 @@ export function getConfigStatus(): Promise<ConfigStatus> {
   return apiClient.get<ConfigStatus>('/config/status');
 }
 
-export function getConfig(): Promise<AppConfig> {
-  return apiClient.get<AppConfig>('/config');
+// Keys that should be parsed as numbers (backend may return them as strings)
+const NUMERIC_CONFIG_KEYS = new Set(['weight_heavy_threshold', 'weight_medium_threshold']);
+
+/**
+ * Normalize config from backend: UPPERCASE keys -> lowercase, string numbers -> numbers.
+ */
+function normalizeConfigKeys(raw: Record<string, unknown>): AppConfig {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const lower = key.toLowerCase();
+    if (NUMERIC_CONFIG_KEYS.has(lower) && typeof value === 'string') {
+      const num = parseFloat(value);
+      result[lower] = Number.isNaN(num) ? value : num;
+    } else {
+      result[lower] = value;
+    }
+  }
+  return result as unknown as AppConfig;
+}
+
+export async function getConfig(): Promise<AppConfig> {
+  const raw = await apiClient.get<Record<string, unknown>>('/config');
+  return normalizeConfigKeys(raw);
 }
 
 export function updateConfig(data: Partial<AppConfig>): Promise<AppConfig> {
