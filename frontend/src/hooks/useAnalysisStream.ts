@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { clearActiveAnalysisJob } from './useActiveAnalysis';
 
 // Type-safe SSE event handler
 function onSSE(es: EventSource, event: string, handler: (data: string) => void) {
@@ -431,13 +432,41 @@ export function useAnalysisStream(jobId: string | undefined) {
         // received).  We use a ref instead of the isComplete state because
         // React state updates are async and won't be visible here yet.
         if (doneRef.current) return;
-        if (retriesRef.current < maxRetries) {
-          retriesRef.current++;
-          setTimeout(connect, 2000 * retriesRef.current);
-        } else {
-          setConnectionError('Connection lost. Stream may have ended.');
-          setIsComplete(true);
-        }
+
+        // Before retrying, probe the stream endpoint with a HEAD-like fetch.
+        // If the server returns 404, the stream does not exist (job is
+        // completed/failed/gone) — treat as permanent failure, don't retry.
+        fetch(`/api/analysis/jobs/${jobId}/stream`, { method: 'GET', headers: { 'Accept': 'text/event-stream' } })
+          .then((resp) => {
+            if (resp.status === 404) {
+              // Stream permanently gone — stop retrying
+              setConnectionError('Analysis stream no longer available.');
+              setIsComplete(true);
+              clearActiveAnalysisJob();
+              // Abort the body so the connection is not left open
+              resp.body?.cancel();
+            } else {
+              // Stream exists but we had a transient error — retry normally
+              resp.body?.cancel();
+              if (retriesRef.current < maxRetries) {
+                retriesRef.current++;
+                setTimeout(connect, 2000 * retriesRef.current);
+              } else {
+                setConnectionError('Connection lost. Stream may have ended.');
+                setIsComplete(true);
+              }
+            }
+          })
+          .catch(() => {
+            // Network error on probe — retry as transient
+            if (retriesRef.current < maxRetries) {
+              retriesRef.current++;
+              setTimeout(connect, 2000 * retriesRef.current);
+            } else {
+              setConnectionError('Connection lost. Stream may have ended.');
+              setIsComplete(true);
+            }
+          });
       };
     };
 

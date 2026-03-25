@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { Outlet, useLocation, Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Sidebar } from './Sidebar';
-import { useActiveAnalysisJob } from '../hooks/useActiveAnalysis';
+import { useActiveAnalysis } from '../hooks/useActiveAnalysis';
 import { apiClient } from '../api/client';
 
 // Fix #8: Breadcrumb label mapping
@@ -30,7 +30,7 @@ export function Layout() {
   const queryClient = useQueryClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
-  const activeJobId = useActiveAnalysisJob();
+  const { activeJobId, activeJobStatus } = useActiveAnalysis();
   const location = useLocation();
 
   // Fix #9: Health check query - polls every 30s, shows banner on failure
@@ -54,9 +54,11 @@ export function Layout() {
     setBannerDismissed(false);
   }, [activeJobId]);
 
-  // Show analysis banner when a job is active and we're not already on the live page
+  // Show analysis banner only when a job is genuinely active (pending/running),
+  // not merely because a stale ID exists in localStorage
   const isOnLivePage = activeJobId ? location.pathname.includes(`/analysis/progress/${activeJobId}`) : false;
-  const showAnalysisBanner = !!activeJobId && !bannerDismissed && !isOnLivePage;
+  const isJobActive = activeJobStatus === 'pending' || activeJobStatus === 'running';
+  const showAnalysisBanner = !!activeJobId && isJobActive && !bannerDismissed && !isOnLivePage;
 
   const toggleSidebar = useCallback(() => {
     setSidebarOpen(prev => !prev);

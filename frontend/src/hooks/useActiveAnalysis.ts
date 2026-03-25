@@ -1,7 +1,11 @@
-import { useCallback, useState, useEffect, useSyncExternalStore } from 'react';
+import { useCallback, useState, useEffect, useRef, useSyncExternalStore } from 'react';
+import { apiClient } from '../api/client';
 
 const STORAGE_KEY = 'portfolio_active_analysis_job';
 const COMPLETION_KEY = 'portfolio_analysis_completed';
+
+// Statuses that mean the job is no longer active
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 // Fix #17: Keep "Last Analysis" link visible for 5 minutes after completion
 const COMPLETION_LINGER_MS = 5 * 60 * 1000;
@@ -127,12 +131,55 @@ export function useActiveAnalysisActions() {
 
 /**
  * Fix #17: Hook that exposes both active job and recent completion state.
- * Returns { activeJobId, completedRecently, completionJobId }.
+ * Returns { activeJobId, activeJobStatus, completedRecently, completionJobId }.
+ *
+ * On mount (and when activeJobId changes), validates the stored job by fetching
+ * its status from the server. If the job is in a terminal state (completed,
+ * failed, cancelled) or no longer exists (404), the stale ID is cleared from
+ * localStorage immediately to prevent SSE 404 spam.
  */
 export function useActiveAnalysis() {
   const activeJobId = useActiveAnalysisJob();
   const [completedRecently, setCompletedRecently] = useState(false);
   const [completionJobId, setCompletionJobId] = useState<string | null>(null);
+  const [activeJobStatus, setActiveJobStatus] = useState<string | null>(null);
+  const validatedRef = useRef<string | null>(null);
+
+  // Validate the stored job ID against the server on mount / change
+  useEffect(() => {
+    if (!activeJobId) {
+      setActiveJobStatus(null);
+      validatedRef.current = null;
+      return;
+    }
+
+    // Only validate once per job ID
+    if (validatedRef.current === activeJobId) return;
+    validatedRef.current = activeJobId;
+
+    let cancelled = false;
+
+    apiClient
+      .get<{ status: string }>(`/analysis/jobs/${activeJobId}`)
+      .then((job) => {
+        if (cancelled) return;
+        if (TERMINAL_STATUSES.has(job.status)) {
+          // Job finished while we were away — clear stale ID
+          clearActiveAnalysisJob();
+        } else {
+          setActiveJobStatus(job.status);
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // 404 or any other error — job doesn't exist, clear it
+        clearActiveAnalysisJob();
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeJobId]);
 
   useEffect(() => {
     function check() {
@@ -171,5 +218,5 @@ export function useActiveAnalysis() {
     };
   }, [activeJobId]);
 
-  return { activeJobId, completedRecently, completionJobId };
+  return { activeJobId, activeJobStatus, completedRecently, completionJobId };
 }
