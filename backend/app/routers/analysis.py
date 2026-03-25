@@ -315,28 +315,47 @@ async def stream_analysis(job_id: str) -> StreamingResponse:
 
     async def event_generator():
         last_id = -1
+        keepalive_interval = 15  # seconds between keepalive comments
+        cycles_per_keepalive = int(keepalive_interval / 1.0)  # 1s per cycle
+        cycle_count = 0
+
         while True:
+            # Drain all available events
+            had_events = False
             for event in stream.subscribe(last_id):
                 last_id = event["id"]
-                yield f"id: {event['id']}\n"
-                yield f"event: {event['type']}\n"
-                yield f"data: {json.dumps(event['data'])}\n\n"
+                had_events = True
+                yield (
+                    f"id: {event['id']}\n"
+                    f"event: {event['type']}\n"
+                    f"data: {json.dumps(event['data'])}\n\n"
+                )
 
+            # Check completion AFTER draining — ensures all events are
+            # delivered before the stream closes.
             if stream.is_complete:
-                # Drain any remaining events that arrived between the
-                # last subscribe() call and mark_complete().
+                # One final drain in case events arrived between
+                # subscribe() and the is_complete check.
                 for event in stream.subscribe(last_id):
                     last_id = event["id"]
-                    yield f"id: {event['id']}\n"
-                    yield f"event: {event['type']}\n"
-                    yield f"data: {json.dumps(event['data'])}\n\n"
-                yield f"event: done\ndata: {{}}\n\n"
-                break
+                    yield (
+                        f"id: {event['id']}\n"
+                        f"event: {event['type']}\n"
+                        f"data: {json.dumps(event['data'])}\n\n"
+                    )
+                yield "event: done\ndata: {}\n\n"
+                return  # closes the connection
 
-            # Yield a keep-alive comment every cycle to detect broken
-            # connections and avoid proxy timeouts.
-            yield ": keepalive\n\n"
-            await asyncio.sleep(0.5)
+            # Send keepalive comment periodically to prevent proxy/browser
+            # timeouts, but only when we haven't already sent data this cycle.
+            cycle_count += 1
+            if not had_events and cycle_count >= cycles_per_keepalive:
+                yield ": keepalive\n\n"
+                cycle_count = 0
+
+            # Wait for new events (non-blocking sleep so the async loop
+            # can service other requests).
+            await asyncio.sleep(1.0)
 
     return StreamingResponse(
         event_generator(),

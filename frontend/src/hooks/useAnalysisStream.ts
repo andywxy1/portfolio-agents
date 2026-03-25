@@ -130,6 +130,7 @@ export function useAnalysisStream(jobId: string | undefined) {
 
   const esRef = useRef<EventSource | null>(null);
   const retriesRef = useRef(0);
+  const doneRef = useRef(false);
   const maxRetries = 3;
 
   const addEvent = useCallback((ticker: string, event: StreamEvent) => {
@@ -168,6 +169,9 @@ export function useAnalysisStream(jobId: string | undefined) {
 
   useEffect(() => {
     if (!jobId) return;
+
+    // Reset done flag for new job connections
+    doneRef.current = false;
 
     const connect = () => {
       const es = new EventSource(`/api/analysis/jobs/${jobId}/stream`);
@@ -377,6 +381,7 @@ export function useAnalysisStream(jobId: string | undefined) {
       });
 
       onSSE(es, 'done', () => {
+        doneRef.current = true;
         setIsComplete(true);
         es.close();
       });
@@ -384,6 +389,10 @@ export function useAnalysisStream(jobId: string | undefined) {
       es.onerror = () => {
         setIsConnected(false);
         es.close();
+        // Do NOT reconnect if the stream ended intentionally (done event
+        // received).  We use a ref instead of the isComplete state because
+        // React state updates are async and won't be visible here yet.
+        if (doneRef.current) return;
         if (retriesRef.current < maxRetries) {
           retriesRef.current++;
           setTimeout(connect, 2000 * retriesRef.current);
