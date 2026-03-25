@@ -314,6 +314,38 @@ def _error_result(ticker: str, error: Exception) -> dict[str, Any]:
     }
 
 
+def check_llm_connectivity(timeout: float = 10.0) -> None:
+    """Verify the LLM proxy is reachable before starting analysis.
+
+    Raises ``ConnectionError`` if the backend URL cannot be reached
+    within *timeout* seconds.  This prevents analysis threads from
+    hanging indefinitely when the LLM host is down.
+    """
+    import urllib.request
+    import urllib.error
+
+    url = settings.llm_base_url.rstrip("/") + "/models"
+    api_key = settings.llm_api_key or settings.openai_api_key
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        # 401/403 means the server is reachable but auth failed -- that is
+        # fine here; the actual LLM call will surface the auth error.
+        if exc.code in (401, 403):
+            logger.debug("LLM proxy returned %d (auth issue) -- server is reachable", exc.code)
+            return
+        raise ConnectionError(
+            f"LLM proxy at {settings.llm_base_url} returned HTTP {exc.code}"
+        ) from exc
+    except Exception as exc:
+        raise ConnectionError(
+            f"LLM proxy at {settings.llm_base_url} is unreachable: {exc}"
+        ) from exc
+
+
 class PipelineAdapter:
     """Wraps TradingAgentsGraph for portfolio analysis with tiered depth.
 

@@ -32,6 +32,10 @@ class Settings(BaseSettings):
 
     # Parallel analysis
     analysis_concurrency: int = 5
+    # Per-ticker analysis timeout in seconds (0 = no timeout).
+    # Prevents threads from hanging indefinitely when the LLM proxy is
+    # unreachable or an individual ticker analysis gets stuck.
+    analysis_ticker_timeout: int = 600  # 10 minutes
 
     # CORS
     cors_origins: list[str] = [

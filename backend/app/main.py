@@ -97,11 +97,12 @@ def _add_depth_column_if_missing() -> None:
 
 
 def _recover_stuck_jobs() -> None:
-    """Mark any pending/running jobs as failed.
+    """Mark any pending/running jobs and position analyses as failed.
 
-    These are zombie jobs left over from a previous process crash or
+    These are zombie rows left over from a previous process crash or
     ungraceful shutdown.  Without this, the 409 rate-limit would block
-    users from starting new analyses.
+    users from starting new analyses, and position_analyses stuck in
+    'running' would never resolve.
     """
     db = SessionLocal()
     try:
@@ -114,9 +115,25 @@ def _recover_stuck_jobs() -> None:
                 "WHERE status IN ('pending', 'running')"
             )
         )
-        db.commit()
         if result.rowcount:
             logger.info("Recovered %d stuck analysis job(s)", result.rowcount)
+
+        # Also recover orphaned position_analyses that were mid-flight
+        pa_result = db.execute(
+            text(
+                "UPDATE position_analyses "
+                "SET status = 'failed', "
+                "    error_message = 'Server restarted during analysis', "
+                "    completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE status = 'running'"
+            )
+        )
+        if pa_result.rowcount:
+            logger.info(
+                "Recovered %d stuck position_analyses row(s)", pa_result.rowcount
+            )
+
+        db.commit()
     except Exception:
         logger.exception("Failed to recover stuck jobs")
     finally:

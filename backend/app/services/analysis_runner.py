@@ -34,7 +34,11 @@ from app.services.event_stream import (
     create_event_stream,
     get_event_stream,
 )
-from app.services.pipeline_adapter import AnalysisCancelledError, PipelineAdapter
+from app.services.pipeline_adapter import (
+    AnalysisCancelledError,
+    PipelineAdapter,
+    check_llm_connectivity,
+)
 from app.services.portfolio import TICKER_SECTOR_MAP, compute_allocation_concentration_sectors, get_sector
 from app.services.recommendation_generator import generate_recommendations
 from app.services.suggestion import generate_suggestions
@@ -406,14 +410,30 @@ class AnalysisRunner:
 
                 thread_db.close()
 
+        # ----- Pre-flight: verify LLM connectivity -----
+        try:
+            check_llm_connectivity(timeout=10.0)
+        except ConnectionError as exc:
+            logger.error("Job %s: LLM connectivity check failed: %s", job_id, exc)
+            self._fail_job(db, job_id, f"LLM proxy unreachable: {exc}")
+            if event_stream:
+                event_stream.emit("error", {
+                    "ticker": "",
+                    "agent": "",
+                    "message": f"LLM proxy unreachable: {exc}",
+                })
+            return
+
         # ----- Run ticker analyses in parallel -----
         concurrency = min(settings.analysis_concurrency, len(tickers))
+        ticker_timeout = settings.analysis_ticker_timeout or None
         logger.info(
-            "Job %s: analyzing %d tickers with concurrency=%d depth_setting=%s",
+            "Job %s: analyzing %d tickers with concurrency=%d depth_setting=%s timeout=%s",
             job_id,
             len(tickers),
             concurrency,
             depth_setting,
+            ticker_timeout,
         )
 
         with ThreadPoolExecutor(max_workers=concurrency) as ticker_pool:
@@ -437,8 +457,46 @@ class AnalysisRunner:
 
                 ticker = futures[future]
                 try:
-                    summary = future.result()
+                    summary = future.result(timeout=ticker_timeout)
                     position_summaries.append(summary)
+                except TimeoutError:
+                    logger.error(
+                        "Ticker %s in job %s timed out after %ss",
+                        ticker,
+                        job_id,
+                        ticker_timeout,
+                    )
+                    # Mark the position analysis as failed in a new session
+                    timeout_db = SessionLocal()
+                    try:
+                        pa_row = (
+                            timeout_db.query(PositionAnalysis)
+                            .filter(
+                                PositionAnalysis.job_id == job_id,
+                                PositionAnalysis.ticker == ticker,
+                                PositionAnalysis.status == "running",
+                            )
+                            .first()
+                        )
+                        if pa_row:
+                            pa_row.status = "failed"
+                            pa_row.error_message = (
+                                f"Analysis timed out after {ticker_timeout}s"
+                            )
+                            pa_row.completed_at = utc_now()
+                            timeout_db.commit()
+                    except Exception:
+                        logger.warning("Failed to mark timed-out PA for %s", ticker)
+                    finally:
+                        timeout_db.close()
+
+                    if event_stream:
+                        event_stream.emit("ticker_complete", {
+                            "ticker": ticker,
+                            "depth": ticker_depth_map.get(ticker, "unknown"),
+                            "signal": "ERROR",
+                            "elapsed_seconds": ticker_timeout,
+                        })
                 except AnalysisCancelledError:
                     # Cancellation: cancel remaining futures and break
                     cancelled_detected = True
