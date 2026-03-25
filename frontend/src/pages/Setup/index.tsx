@@ -196,6 +196,9 @@ export default function Setup() {
     }
   }, [buildPayload, updateConfig]);
 
+  // UX-53: Saved feedback on button text
+  const [savedFeedback, setSavedFeedback] = useState(false);
+
   // Save for settings mode (stays on page, shows toast)
   const handleSettingsSave = useCallback(async () => {
     setSaveError(null);
@@ -205,6 +208,8 @@ export default function Setup() {
       toast.success('Settings saved successfully');
       changedFieldsRef.current.clear();
       setHasUnsavedChanges(false);
+      setSavedFeedback(true);
+      setTimeout(() => setSavedFeedback(false), 3000);
     } catch (err: any) {
       setSaveError(err?.message ?? 'Failed to save configuration');
       toast.error(err?.message ?? 'Failed to save configuration');
@@ -350,7 +355,7 @@ export default function Setup() {
             disabled={updateConfig.isPending}
             className="rounded-lg bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition-all hover:bg-emerald-500 disabled:opacity-50"
           >
-            {updateConfig.isPending ? 'Saving...' : 'Save'}
+            {updateConfig.isPending ? 'Saving...' : savedFeedback ? '\u2713 Saved' : 'Save'}
           </button>
         </div>
 
@@ -368,48 +373,7 @@ export default function Setup() {
       </div>
     );
 
-    // Fix #13: Wrap in sidebar layout (simplified inline sidebar to avoid broken Sidebar import)
-    return (
-      <div className="flex h-screen">
-        <aside className="hidden lg:flex h-full w-64 flex-col bg-slate-900 text-slate-300 flex-shrink-0">
-          <div className="flex items-center gap-3 px-6 py-5 border-b border-slate-700/50">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400 font-bold text-lg">
-              P
-            </div>
-            <div>
-              <h1 className="text-sm font-semibold text-white leading-tight">Portfolio Agents</h1>
-              <p className="text-xs text-slate-500">AI-Powered Analysis</p>
-            </div>
-          </div>
-          <nav className="flex-1 px-3 py-4 space-y-1">
-            {[
-              { to: '/', label: 'Dashboard' },
-              { to: '/holdings', label: 'Holdings' },
-              { to: '/analysis', label: 'Analysis Results' },
-              { to: '/recommendations', label: 'Recommendations' },
-              { to: '/history', label: 'History' },
-            ].map(item => (
-              <a
-                key={item.to}
-                href={item.to}
-                onClick={(e) => { e.preventDefault(); navigate(item.to); }}
-                className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 transition-colors"
-              >
-                {item.label}
-              </a>
-            ))}
-          </nav>
-          <div className="border-t border-slate-700/50 px-3 py-3">
-            <div className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium bg-slate-800 text-white">
-              Settings
-            </div>
-          </div>
-        </aside>
-        <main className="flex-1 overflow-y-auto bg-gray-50">
-          {settingsContent}
-        </main>
-      </div>
-    );
+    return settingsContent;
   }
 
   // ---------------------------------------------------------------------------

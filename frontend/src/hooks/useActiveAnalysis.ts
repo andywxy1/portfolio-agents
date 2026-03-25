@@ -161,11 +161,14 @@ export function useActiveAnalysis() {
       }
     }
 
-    check();
+    const cleanup = check();
 
     // Re-check when storage changes
     const unsub = subscribe(() => check());
-    return unsub;
+    return () => {
+      if (typeof cleanup === 'function') cleanup();
+      unsub();
+    };
   }, [activeJobId]);
 
   return { activeJobId, completedRecently, completionJobId };

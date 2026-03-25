@@ -25,6 +25,7 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   // Fix #1: Focus Cancel button for destructive dialogs, Confirm for non-destructive
   useEffect(() => {
@@ -40,7 +41,29 @@ export function ConfirmDialog({
   useEffect(() => {
     if (!open) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onCancel();
+      if (e.key === 'Escape') {
+        onCancel();
+        return;
+      }
+      if (e.key === 'Tab') {
+        const focusable = panelRef.current?.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        if (!focusable || focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey) {
+          if (document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
     };
     document.addEventListener('keydown', handleKey);
     return () => document.removeEventListener('keydown', handleKey);
@@ -53,7 +76,7 @@ export function ConfirmDialog({
       {/* Backdrop */}
       <div className="fixed inset-0 bg-black/40 transition-opacity" onClick={onCancel} />
       {/* Panel */}
-      <div className="relative z-10 mx-4 w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+      <div ref={panelRef} className="relative z-10 mx-4 w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
         <h3 id="confirm-dialog-title" className="text-lg font-semibold text-gray-900">{title}</h3>
         {message && <p className="mt-2 text-sm text-gray-600">{message}</p>}
         {children && <div className="mt-3">{children}</div>}

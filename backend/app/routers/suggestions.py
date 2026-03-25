@@ -18,12 +18,15 @@ router = APIRouter(prefix="/api/suggestions", tags=["suggestions"])
 def list_suggestions(
     status: str | None = Query(None),
     gap_type: str | None = Query(None),
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     user_id: str = Depends(require_api_key),
 ) -> dict:
-    """List stock suggestions with optional filters and pagination."""
+    """List stock suggestions with optional filters and pagination.
+
+    Uses page/page_size convention consistent with all other endpoints.
+    """
     query = db.query(StockSuggestion).filter(StockSuggestion.user_id == user_id)
 
     if status:
@@ -35,8 +38,8 @@ def list_suggestions(
     suggestions = (
         query
         .order_by(StockSuggestion.created_at.desc())
-        .offset(offset)
-        .limit(limit)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
         .all()
     )
 
@@ -67,7 +70,7 @@ def list_suggestions(
     return {
         "data": items,
         "total": total,
-        "limit": limit,
-        "offset": offset,
-        "has_more": (offset + limit) < total,
+        "page": page,
+        "page_size": page_size,
+        "has_more": (page * page_size) < total,
     }

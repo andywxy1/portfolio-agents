@@ -300,8 +300,12 @@ class AnalysisRunner:
                 pa.completed_at = utc_now()
                 thread_db.commit()
 
-                # Store reports
-                self._store_reports(thread_db, job_id, pa_id, user_id, ticker, result)
+                # Store reports (isolated try/except with rollback)
+                try:
+                    self._store_reports(thread_db, job_id, pa_id, user_id, ticker, result)
+                except Exception:
+                    logger.exception("Failed to store reports for %s in job %s", ticker, job_id)
+                    thread_db.rollback()
 
                 signal = result.get("signal", "HOLD")
 
@@ -526,13 +530,15 @@ class AnalysisRunner:
                         job_id,
                     )
 
-                # Sector-gap suggestions
+                # Sector-gap suggestions — commit is caller's responsibility
                 try:
                     generate_suggestions(
                         db, job_id, user_id, holdings,
                         current_prices=current_prices,
                     )
+                    db.commit()
                 except Exception:
+                    db.rollback()
                     logger.exception(
                         "Suggestion generation failed for job %s", job_id
                     )
@@ -573,18 +579,31 @@ class AnalysisRunner:
                     job_id,
                 )
 
-        # Mark complete (unless cancelled during synthesis)
+        # Mark complete (unless cancelled during synthesis) — use conditional
+        # UPDATE to avoid race with the cancel endpoint.
         if not self._is_cancelled(job_id):
-            job.status = "completed"
-            job.completed_at = utc_now()
+            from sqlalchemy import and_
+            result = db.execute(
+                AnalysisJob.__table__.update()
+                .where(
+                    and_(
+                        AnalysisJob.id == job_id,
+                        AnalysisJob.status.notin_(["cancelled", "failed"]),
+                    )
+                )
+                .values(status="completed", completed_at=utc_now())
+            )
             db.commit()
-            logger.info("Job %s completed successfully", job_id)
-            if event_stream:
-                event_stream.emit("job_status", {
-                    "status": "completed",
-                    "tickers_completed": completed_count,
-                    "tickers_total": len(tickers),
-                })
+            if result.rowcount > 0:
+                logger.info("Job %s completed successfully", job_id)
+                if event_stream:
+                    event_stream.emit("job_status", {
+                        "status": "completed",
+                        "tickers_completed": completed_count,
+                        "tickers_total": len(tickers),
+                    })
+            else:
+                logger.info("Job %s was already cancelled/failed; skipping completion", job_id)
         else:
             # Cancel endpoint may have already marked the job; only update if needed
             if job.status not in ("cancelled", "failed"):
@@ -1068,13 +1087,13 @@ def _compute_weight_map_with_prices(
     for h in holdings:
         price = current_prices.get(h.ticker.upper(), h.buy_price)
         value = h.shares * price
-        position_values[h.ticker] = value
+        position_values[h.ticker.upper()] = value
         total += value
 
     if total == 0:
         return {}, current_prices
 
-    weight_map = {ticker: val / total for ticker, val in position_values.items()}
+    weight_map = {ticker.upper(): val / total for ticker, val in position_values.items()}
     return weight_map, current_prices
 
 

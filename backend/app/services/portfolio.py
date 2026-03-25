@@ -224,13 +224,14 @@ def _compute_concentration(allocation: list[AllocationEntry]) -> ConcentrationMe
     sorted_weights = sorted(weights, reverse=True)
     top3 = sum(sorted_weights[:3])
     top5 = sum(sorted_weights[:5])
-    max_weight = sorted_weights[0]
 
+    # Track max-weight ticker during iteration to avoid float == comparison
+    max_weight = 0.0
     max_ticker = ""
     for a in allocation:
-        if a.weight == max_weight:
+        if a.weight is not None and a.weight > max_weight:
+            max_weight = a.weight
             max_ticker = a.ticker
-            break
 
     return ConcentrationMetrics(
         hhi=round(hhi, 2),
@@ -277,7 +278,7 @@ def compute_allocation_concentration_sectors(
             market_value = h.shares * h.buy_price
             price = None
         cost_basis = h.shares * h.buy_price
-        pnl = (market_value - cost_basis) if market_value else None
+        pnl = (market_value - cost_basis) if price is not None else None
         pnl_pct = (pnl / cost_basis) if pnl is not None and cost_basis > 0 else None
         total_value += market_value
         entries.append({
@@ -296,15 +297,16 @@ def compute_allocation_concentration_sectors(
         for e in entries:
             e["weight"] = round(e["market_value"] / total_value, 6)
 
-    # Concentration (HHI)
+    # Concentration (HHI) — track max during iteration to avoid float ==
     weights = [e["weight"] for e in entries if e["weight"] > 0]
     sorted_w = sorted(weights, reverse=True)
     hhi = sum(w * w for w in weights) * 10000 if weights else 0
+    max_weight = 0.0
     max_ticker = ""
     for e in entries:
-        if sorted_w and e["weight"] == sorted_w[0]:
+        if e["weight"] > max_weight:
+            max_weight = e["weight"]
             max_ticker = e["ticker"]
-            break
     concentration = {
         "hhi": round(hhi, 2),
         "top3_weight": round(sum(sorted_w[:3]), 6),

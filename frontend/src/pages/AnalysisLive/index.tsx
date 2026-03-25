@@ -1,5 +1,6 @@
 import { useParams, useNavigate } from 'react-router-dom';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { usePageTitle } from '../../hooks/usePageTitle';
 import { clearActiveAnalysisJob } from '../../hooks/useActiveAnalysis';
 import { useToast } from '../../components/Toast';
@@ -630,6 +631,7 @@ export default function AnalysisLive() {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
   const toast = useToast();
+  const queryClient = useQueryClient();
   const cancelMutation = useCancelAnalysis();
 
   // SSE stream
@@ -648,6 +650,7 @@ export default function AnalysisLive() {
     tickerDepths,
     activeTickers: concurrentTickers,
     overallDepth,
+    reconnect,
   } = useAnalysisStream(jobId);
 
   // Messages ticker filter
@@ -750,7 +753,14 @@ export default function AnalysisLive() {
       // Silently fail - streaming reports remain as fallback
       console.warn('Failed to fetch full reports from DB:', err);
     });
-  }, [isComplete, jobId, decisions, setReportsByTicker, setDecisions]);
+    // Invalidate stale queries so other pages reflect new data
+    queryClient.invalidateQueries({ queryKey: ['analysis'] });
+    queryClient.invalidateQueries({ queryKey: ['recommendations'] });
+    queryClient.invalidateQueries({ queryKey: ['suggestions'] });
+    queryClient.invalidateQueries({ queryKey: ['position-analyses'] });
+    queryClient.invalidateQueries({ queryKey: ['portfolio-summary'] });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isComplete, jobId, setReportsByTicker, setDecisions, queryClient]);
 
   // Report panel collapsed state
   const [reportsCollapsed, setReportsCollapsed] = useState(false);
@@ -796,21 +806,19 @@ export default function AnalysisLive() {
   const activeDecision = decisions.get(activeTicker);
   const activeTickerDepth = tickerDepths.get(activeTicker);
 
-  // Fix #19: Maintain a pre-merged sorted array, only re-sort on filter change
-  // Append-only sorted array for all events
+  // Maintain a growing merged array in a ref. Only append new events to avoid O(n log n) re-sort.
   const mergedEventsRef = useRef<StreamEvent[]>([]);
   const mergedEventsCountRef = useRef(0);
+  const lastMergeFilterRef = useRef<string>('_all');
 
   const activeEvents = useMemo(() => {
     if (messageTickerFilter === '_all') {
-      // Count total events across all tickers
       let totalCount = 0;
       for (const [, events] of eventsByTicker) {
         totalCount += events.length;
       }
-      // If new events arrived, append them in order (events arrive chronologically)
-      if (totalCount > mergedEventsCountRef.current) {
-        // Rebuild from scratch on filter change or when we detect resets
+      // Filter changed or events reset - full rebuild required
+      if (lastMergeFilterRef.current !== '_all' || totalCount < mergedEventsCountRef.current) {
         const all: StreamEvent[] = [];
         for (const [, events] of eventsByTicker) {
           all.push(...events);
@@ -818,9 +826,34 @@ export default function AnalysisLive() {
         all.sort((a, b) => a.timestamp - b.timestamp);
         mergedEventsRef.current = all;
         mergedEventsCountRef.current = totalCount;
+      } else if (totalCount > mergedEventsCountRef.current) {
+        // Append only new events. Each ticker array grows monotonically, so we
+        // track per-ticker offsets via the total count delta.
+        const existing = mergedEventsRef.current;
+        const newEvents: StreamEvent[] = [];
+        // Collect all events from each ticker beyond what we've already merged.
+        // Since we only know the aggregate count, gather everything and dedupe
+        // against the last timestamp boundary.
+        const lastTs = existing.length > 0 ? existing[existing.length - 1].timestamp : 0;
+        for (const [, events] of eventsByTicker) {
+          for (let i = events.length - 1; i >= 0; i--) {
+            if (events[i].timestamp <= lastTs) break;
+            newEvents.push(events[i]);
+          }
+        }
+        // Sort only the new batch (small)
+        newEvents.sort((a, b) => a.timestamp - b.timestamp);
+        // Fast path: all new events are after existing ones (common case)
+        if (newEvents.length > 0) {
+          existing.push(...newEvents);
+        }
+        mergedEventsRef.current = existing;
+        mergedEventsCountRef.current = totalCount;
       }
+      lastMergeFilterRef.current = '_all';
       return mergedEventsRef.current;
     }
+    lastMergeFilterRef.current = messageTickerFilter;
     return eventsByTicker.get(messageTickerFilter) ?? eventsByTicker.get('_all') ?? [];
   }, [eventsByTicker, messageTickerFilter]);
 
@@ -871,7 +904,7 @@ export default function AnalysisLive() {
   // Loading state
   if (jobLoading && !isConnected) {
     return (
-      <div className="-m-4 sm:-m-6 bg-gray-950 flex items-center justify-center h-[calc(100vh-3.25rem)] lg:h-screen">
+      <div className="-m-4 sm:-m-6 bg-gray-950 flex items-center justify-center flex-1 min-h-0 overflow-hidden">
         <div className="flex flex-col items-center gap-4">
           <div className="h-12 w-12 animate-spin rounded-full border-4 border-gray-700 border-t-blue-500" />
           <p className="text-sm text-gray-400">Connecting to analysis stream...</p>
@@ -883,7 +916,7 @@ export default function AnalysisLive() {
   // Error state
   if (jobError && !isConnected && !isComplete) {
     return (
-      <div className="-m-4 sm:-m-6 bg-gray-950 flex items-center justify-center p-4 h-[calc(100vh-3.25rem)] lg:h-screen">
+      <div className="-m-4 sm:-m-6 bg-gray-950 flex items-center justify-center p-4 flex-1 min-h-0 overflow-hidden">
         <div className="rounded-xl border border-red-900 bg-red-950/50 p-6 text-center max-w-md">
           <p className="text-sm font-medium text-red-400">Could not load analysis job.</p>
           <button
@@ -898,7 +931,7 @@ export default function AnalysisLive() {
   }
 
   return (
-    <div className="-m-4 sm:-m-6 bg-gray-950 text-gray-100 flex flex-col h-[calc(100vh-3.25rem)] lg:h-screen">
+    <div className="-m-4 sm:-m-6 bg-gray-950 text-gray-100 flex flex-col flex-1 min-h-0 overflow-hidden">
       {/* ================================================================== */}
       {/* HEADER */}
       {/* ================================================================== */}
@@ -1057,8 +1090,14 @@ export default function AnalysisLive() {
 
         {/* Connection error banner */}
         {connectionError && (
-          <div className="mt-2 text-xs text-amber-400 bg-amber-950/30 rounded px-2 py-1">
-            {connectionError}
+          <div className="mt-2 text-xs text-amber-400 bg-amber-950/30 rounded px-2 py-1 flex items-center gap-2">
+            <span>{connectionError}</span>
+            <button
+              onClick={reconnect}
+              className="flex-shrink-0 rounded bg-amber-800/60 px-2 py-0.5 text-xs font-medium text-amber-200 hover:bg-amber-700/60 transition-colors"
+            >
+              Reconnect
+            </button>
           </div>
         )}
       </header>

@@ -12,8 +12,8 @@ const STEPS = [
   {
     number: 2,
     title: 'Run analysis',
-    description: 'Go to Analysis Results and start a new analysis to evaluate your portfolio.',
-    navHint: 'Analysis Results',
+    description: "Go to Holdings and click 'Analyze Portfolio' to evaluate your holdings.",
+    navHint: 'Holdings',
   },
   {
     number: 3,
@@ -23,7 +23,7 @@ const STEPS = [
   },
 ];
 
-export function OnboardingGuide() {
+export function OnboardingGuide({ configured }: { configured?: boolean }) {
   const [dismissed, setDismissed] = useState(true);
   const [currentStep, setCurrentStep] = useState(0);
 
@@ -61,7 +61,8 @@ export function OnboardingGuide() {
     }
   }, [currentStep]);
 
-  if (dismissed) return null;
+  // Don't show onboarding when app is not yet configured (setup wizard handles that)
+  if (dismissed || !configured) return null;
 
   const step = STEPS[currentStep];
 

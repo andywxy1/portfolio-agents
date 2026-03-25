@@ -174,7 +174,7 @@ export default function History() {
                 <YAxis
                   tick={{ fontSize: 11 }}
                   tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`}
-                  domain={['dataMin - 5000', 'dataMax + 5000']}
+                  domain={[(dataMin: number) => dataMin - Math.max(1000, Math.abs(dataMin) * 0.1), (dataMax: number) => dataMax + Math.max(1000, Math.abs(dataMax) * 0.1)]}
                 />
                 <Tooltip
                   contentStyle={{ borderRadius: '8px', fontSize: '13px', border: '1px solid #e5e7eb' }}
@@ -231,7 +231,7 @@ export default function History() {
               {([['7d', 'Last 7 days'], ['30d', 'Last 30 days'], ['all', 'All time']] as const).map(([val, label]) => (
                 <button
                   key={val}
-                  onClick={() => { setDateFilter(val); setCurrentPage(0); }}
+                  onClick={() => { setDateFilter(val); setCurrentPage(0); setExpandedJob(null); }}
                   className={`px-3 py-1.5 text-xs font-medium transition-colors ${
                     dateFilter === val
                       ? 'bg-slate-900 text-white'
@@ -507,6 +507,9 @@ function ComparePanel({ jobA, jobB }: { jobA: AnalysisJob; jobB: AnalysisJob }) 
                 <>
                   {a.signal ? <SignalBadge signal={a.signal} /> : <span className="text-gray-400">--</span>}
                   <span className="text-xs text-gray-400 capitalize">{a.analysis_depth}</span>
+                  {a.current_price != null && (
+                    <span className="text-xs text-gray-500 tabular-nums">{formatCurrency(a.current_price)}</span>
+                  )}
                 </>
               ) : (
                 <span className="text-xs text-gray-400">Not included</span>
@@ -517,6 +520,9 @@ function ComparePanel({ jobA, jobB }: { jobA: AnalysisJob; jobB: AnalysisJob }) 
                 <>
                   {b.signal ? <SignalBadge signal={b.signal} /> : <span className="text-gray-400">--</span>}
                   <span className="text-xs text-gray-400 capitalize">{b.analysis_depth}</span>
+                  {b.current_price != null && (
+                    <span className="text-xs text-gray-500 tabular-nums">{formatCurrency(b.current_price)}</span>
+                  )}
                   {signalChanged && (
                     <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700">
                       Changed

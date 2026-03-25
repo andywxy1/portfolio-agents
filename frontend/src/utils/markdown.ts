@@ -164,12 +164,12 @@ export function renderMarkdown(text: string, theme: MarkdownTheme = 'dark'): str
     }
   );
 
-  // Unordered lists
+  // Unordered lists (use [-] only to avoid matching **bold** mid-line)
   html = html.replace(
-    /((?:^[ \t]*[-*] .+$\n?)+)/gm,
+    /((?:^[ \t]*[-] .+$\n?)+)/gm,
     (block) => {
       const items = block.trim().split('\n').map(line => {
-        const m = line.match(/^([ \t]*)[-*]\s+(.+)$/);
+        const m = line.match(/^([ \t]*)[-]\s+(.+)$/);
         if (!m) return '';
         const indent = m[1].length;
         const mlClass = indent >= 4 ? 'ml-8' : indent >= 2 ? 'ml-6' : 'ml-4';
@@ -198,6 +198,26 @@ export function renderMarkdown(text: string, theme: MarkdownTheme = 'dark'): str
   // Clean up empty paragraphs
   html = html.replace(/<p[^>]*>\s*<\/p>/g, '');
 
+  // Sanitize: strip dangerous tags and attributes to prevent XSS
+  html = sanitizeHtml(html);
+
+  return html;
+}
+
+/**
+ * Lightweight HTML sanitizer that strips dangerous tags and attributes.
+ * Not a full sanitizer — intended as a defense-in-depth layer after
+ * markdown rendering (which already escapes raw HTML entities).
+ */
+function sanitizeHtml(html: string): string {
+  // Remove dangerous tags and their content
+  html = html.replace(/<\s*\/?\s*(script|iframe|object|embed|form|input|textarea|select|button|link|meta|style|base)(\s[^>]*)?\s*\/?>/gi, '');
+  // Remove content between script/style/iframe tags
+  html = html.replace(/<\s*(script|style|iframe|object|embed)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
+  // Remove event handler attributes (on*)
+  html = html.replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  // Remove javascript: and data: in href/src attributes
+  html = html.replace(/(href|src|action)\s*=\s*(?:"[^"]*(?:javascript|data)\s*:[^"]*"|'[^']*(?:javascript|data)\s*:[^']*')/gi, '');
   return html;
 }
 

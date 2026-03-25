@@ -123,8 +123,11 @@ export function estimateTime(tickerCount: number, depth: AnalysisRequestDepth, c
 
 /** Estimate auto depth breakdown */
 export function estimateAutoBreakdown(tickerCount: number): { deep: number; medium: number; light: number } {
-  // Fix #13: Guard against 0 (or negative) tickers producing negative values
+  // Guard against 0 (or negative) tickers producing negative values
   if (tickerCount <= 0) return { deep: 0, medium: 0, light: 0 };
+  // Special cases for small counts
+  if (tickerCount === 1) return { deep: 1, medium: 0, light: 0 };
+  if (tickerCount === 2) return { deep: 1, medium: 1, light: 0 };
   // Rough heuristic: top 30% deep, middle 40% medium, bottom 30% light
   const deep = Math.max(1, Math.round(tickerCount * 0.3));
   const light = Math.max(1, Math.round(tickerCount * 0.3));

@@ -166,7 +166,11 @@ async def get_config(
 
 class ConfigUpdate(BaseModel):
     """Flexible config update body -- any subset of allowed keys."""
+    current_api_key: str | None = None
     model_config = {"extra": "allow"}
+
+# Default API key value used before the user has configured their own key.
+_DEFAULT_API_KEY = "changeme"
 
 
 @router.put("")
@@ -174,11 +178,33 @@ async def update_config(
     body: ConfigUpdate,
     user_id: str = Depends(require_api_key),
 ) -> dict[str, Any]:
-    """Update configuration values, write to .env, and reload."""
+    """Update configuration values, write to .env, and reload.
+
+    Once the API_KEY has been changed from its default value, subsequent
+    API_KEY changes require the ``current_api_key`` field to match the
+    currently stored key. This prevents accidental lockout.
+    """
     raw = body.model_dump(exclude_unset=True)
+    # Remove the helper field before treating as config updates
+    supplied_current_key = raw.pop("current_api_key", None)
 
     # Normalize keys to uppercase (frontend sends lowercase)
     updates = {k.upper(): v for k, v in raw.items()}
+
+    # Guard: once API_KEY has been changed from default, require current_api_key
+    if "API_KEY" in updates:
+        existing_key = getattr(settings, "api_key", _DEFAULT_API_KEY)
+        if existing_key != _DEFAULT_API_KEY:
+            if not supplied_current_key or supplied_current_key != existing_key:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "error": {
+                            "code": "CURRENT_KEY_REQUIRED",
+                            "message": "current_api_key must match the existing API key to change it.",
+                        }
+                    },
+                )
 
     # Validate keys
     invalid_keys = set(updates.keys()) - _ALLOWED_KEYS
@@ -250,7 +276,10 @@ class ValidateRequest(BaseModel):
 
 
 @router.post("/validate", response_model=ValidateResponse)
-def validate_connections(body: ValidateRequest | None = None) -> ValidateResponse:
+def validate_connections(
+    body: ValidateRequest | None = None,
+    user_id: str = Depends(require_api_key),
+) -> ValidateResponse:
     """Test Alpaca and LLM connections. Uses request body values if provided, else saved settings."""
     overrides = body.model_dump(exclude_none=True) if body else {}
     alpaca_result = _test_alpaca(overrides)

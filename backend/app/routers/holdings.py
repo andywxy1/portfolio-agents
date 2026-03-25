@@ -70,7 +70,19 @@ async def import_holdings_csv(
     Skips rows where the ticker already exists as an active holding.
     Returns { imported: N, errors: [{row: N, message: "..."}] }.
     """
+    # Reject files larger than 5 MB to prevent resource exhaustion
+    _MAX_CSV_SIZE = 5 * 1024 * 1024  # 5 MB
     content = await file.read()
+    if len(content) > _MAX_CSV_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "FILE_TOO_LARGE",
+                    "message": f"CSV file exceeds maximum allowed size of 5 MB ({len(content)} bytes received).",
+                }
+            },
+        )
     try:
         text = content.decode("utf-8-sig")  # Handle BOM from Excel
     except UnicodeDecodeError:

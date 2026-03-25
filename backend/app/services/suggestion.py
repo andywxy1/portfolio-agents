@@ -218,6 +218,8 @@ def generate_suggestions(
             db.add(suggestion)
             suggestions.append(suggestion)
 
-    db.commit()
+    # NOTE: This function does NOT commit. The caller (analysis_runner)
+    # controls the transaction boundary so that suggestions are committed
+    # atomically with the rest of the job results.
     logger.info("Generated %d stock suggestions for job %s", len(suggestions), job_id)
     return suggestions

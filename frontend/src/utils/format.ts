@@ -103,6 +103,8 @@ export function formatDateTime(iso: string | null | undefined): string {
 export function formatRelativeTime(iso: string | null | undefined): string {
   if (!iso) return '--';
   const diff = Date.now() - new Date(iso).getTime();
+  // Future timestamp: treat as just now
+  if (diff < 0) return 'just now';
   const absDiff = Math.abs(diff);
   const seconds = Math.floor(absDiff / 1000);
   const minutes = Math.floor(seconds / 60);

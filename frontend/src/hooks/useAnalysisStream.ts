@@ -146,6 +146,19 @@ export function useAnalysisStream(jobId: string | undefined) {
   const eventCounterRef = useRef(0);
   const maxRetries = 3;
 
+  // UX-56: Manual reconnect trigger
+  const [reconnectCounter, setReconnectCounter] = useState(0);
+
+  const reconnect = useCallback(() => {
+    esRef.current?.close();
+    retriesRef.current = 0;
+    doneRef.current = false;
+    setIsConnected(false);
+    setIsComplete(false);
+    setConnectionError(null);
+    setReconnectCounter(c => c + 1);
+  }, []);
+
   const addEvent = useCallback((ticker: string, event: StreamEvent) => {
     setEventsByTicker(prev => {
       const next = new Map(prev);
@@ -433,7 +446,7 @@ export function useAnalysisStream(jobId: string | undefined) {
     return () => {
       esRef.current?.close();
     };
-  }, [jobId, addEvent, nextEventId, setStage, addReport]);
+  }, [jobId, addEvent, nextEventId, setStage, addReport, reconnectCounter]);
 
   return {
     eventsByTicker,
@@ -451,5 +464,6 @@ export function useAnalysisStream(jobId: string | undefined) {
     tickerCompleted,
     activeTickers,
     overallDepth,
+    reconnect,
   };
 }

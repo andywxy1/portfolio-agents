@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { usePositionAnalyses, useStartAnalysis } from '../../api/hooks';
 import { EmptyState } from '../../components/EmptyState';
 import { SkeletonReportPanel, Skeleton } from '../../components/Skeleton';
@@ -175,18 +175,25 @@ export default function Analysis() {
   const toast = useToast();
   const { data: analyses, isLoading, error } = usePositionAnalyses();
   const analysisMutation = useStartAnalysis();
-  const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  const [selectedTicker, setSelectedTicker] = useState<string | null>(
+    searchParams.get('ticker')
+  );
   const [searchQuery, setSearchQuery] = useState('');
+  const [reanalyzingTicker, setReanalyzingTicker] = useState<string | null>(null);
 
   const handleReanalyze = useCallback((ticker: string) => {
+    setReanalyzingTicker(ticker);
     analysisMutation.mutate(
       { mode: 'single', ticker },
       {
         onSuccess: (result) => {
+          setReanalyzingTicker(null);
           toast.info(`Re-analysis started for ${ticker}`);
           navigate(`/analysis/progress/${result.job_id}`);
         },
         onError: (err) => {
+          setReanalyzingTicker(null);
           toast.error(`Analysis failed: ${err.message}`);
         },
       }
@@ -323,7 +330,7 @@ export default function Analysis() {
           <AnalysisDetail
             analysis={selected}
             onReanalyze={handleReanalyze}
-            isReanalyzing={analysisMutation.isPending}
+            isReanalyzing={reanalyzingTicker === selected.ticker}
           />
         </div>
       </div>

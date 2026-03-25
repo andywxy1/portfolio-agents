@@ -15,6 +15,7 @@ const AnalysisLive = lazy(() => import('./pages/AnalysisLive'));
 const Recommendations = lazy(() => import('./pages/Recommendations'));
 const History = lazy(() => import('./pages/History'));
 const Setup = lazy(() => import('./pages/Setup'));
+const NotFound = lazy(() => import('./pages/NotFound'));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -31,7 +32,7 @@ function AppRoutes() {
 
   if (isLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-900">
+      <div className="flex min-h-screen items-center justify-center bg-gray-50">
         <LoadingSpinner size="lg" label="Loading configuration..." />
       </div>
     );
@@ -41,6 +42,9 @@ function AppRoutes() {
   const needsSetup = !isError && configStatus && !configStatus.configured;
 
   return (
+    <>
+    {/* Only show onboarding when configured (not during setup wizard) */}
+    <OnboardingGuide configured={configStatus?.configured === true} />
     <Routes>
       {/* Setup route is always accessible (for reconfiguration) */}
       <Route
@@ -106,10 +110,18 @@ function AppRoutes() {
               </Suspense>
             }
           />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route
+            path="*"
+            element={
+              <Suspense fallback={<LoadingSpinner />}>
+                <NotFound />
+              </Suspense>
+            }
+          />
         </Route>
       )}
     </Routes>
+    </>
   );
 }
 
@@ -119,8 +131,6 @@ export default function App() {
       <ToastProvider>
         <ErrorBoundary>
           <BrowserRouter>
-            {/* Fix #16: Post-setup onboarding overlay (localStorage-persisted) */}
-            <OnboardingGuide />
             <AppRoutes />
           </BrowserRouter>
         </ErrorBoundary>

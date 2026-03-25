@@ -103,37 +103,47 @@ export default function Holdings() {
 
   const { data: tickerValidation, isFetching: validatingTicker } = useValidateTicker(tickerDebounced);
 
-  // Auto-save debounce for inline edits (Item 17)
-  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // UX-38: Save-on-blur instead of debounced-on-change
   const [savingIndicator, setSavingIndicator] = useState<string | null>(null);
+  // UX-39: Inline edit validation errors
+  const [editErrors, setEditErrors] = useState<Record<string, string>>({});
 
-  const triggerAutoSave = useCallback((id: string, values: Record<string, string>) => {
-    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-    autoSaveTimerRef.current = setTimeout(() => {
-      setSavingIndicator(id);
-      updateMutation.mutate(
-        {
-          id,
-          data: {
-            ticker: values.ticker,
-            shares: Number(values.shares),
-            buy_price: Number(values.buy_price),
-            notes: values.notes || null,
-          },
+  const validateEditValues = useCallback((values: Record<string, string>): Record<string, string> => {
+    const errors: Record<string, string> = {};
+    const shares = Number(values.shares);
+    const buyPrice = Number(values.buy_price);
+    if (isNaN(shares) || shares <= 0) errors.shares = 'Shares must be > 0';
+    if (isNaN(buyPrice) || buyPrice < 0) errors.buy_price = 'Price must be >= 0';
+    return errors;
+  }, []);
+
+  const saveEdit = useCallback((id: string, values: Record<string, string>) => {
+    const errors = validateEditValues(values);
+    setEditErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+    setSavingIndicator(id);
+    updateMutation.mutate(
+      {
+        id,
+        data: {
+          ticker: values.ticker,
+          shares: Number(values.shares),
+          buy_price: Number(values.buy_price),
+          notes: values.notes || null,
         },
-        {
-          onSuccess: () => {
-            setTimeout(() => setSavingIndicator(prev => prev === id ? null : prev), 1500);
-            toast.success('Holding updated');
-          },
-          onError: () => {
-            setSavingIndicator(null);
-            toast.error('Failed to save changes');
-          },
-        }
-      );
-    }, 500);
-  }, [updateMutation, toast]);
+      },
+      {
+        onSuccess: () => {
+          setTimeout(() => setSavingIndicator(prev => prev === id ? null : prev), 1500);
+          toast.success('Holding updated');
+        },
+        onError: () => {
+          setSavingIndicator(null);
+          toast.error('Failed to save changes');
+        },
+      }
+    );
+  }, [updateMutation, toast, validateEditValues]);
 
   // Import handling (Item 2)
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -197,9 +207,13 @@ export default function Holdings() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (singleTickerPopover) {
+          setSingleTickerPopover(null);
+        }
         if (editingId) {
           setEditingId(null);
           setEditValues({});
+          setEditErrors({});
         }
         if (showAddRow) {
           setShowAddRow(false);
@@ -209,7 +223,7 @@ export default function Holdings() {
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [editingId, showAddRow]);
+  }, [editingId, showAddRow, singleTickerPopover]);
 
   const startEdit = useCallback((row: HoldingWithPrice) => {
     setEditingId(row.id);
@@ -219,20 +233,33 @@ export default function Holdings() {
       buy_price: String(row.buy_price),
       notes: row.notes ?? '',
     });
+    setEditErrors({});
   }, []);
 
-  const handleEditChange = useCallback((field: string, value: string, id: string) => {
-    setEditValues(prev => {
-      const updated = { ...prev, [field]: value };
-      triggerAutoSave(id, updated);
-      return updated;
+  // UX-38: Just update local state; save happens on blur
+  const handleEditChange = useCallback((field: string, value: string, _id: string) => {
+    setEditValues(prev => ({ ...prev, [field]: value }));
+    // Clear field error on change
+    setEditErrors(prev => {
+      if (!prev[field]) return prev;
+      const next = { ...prev };
+      delete next[field];
+      return next;
     });
-  }, [triggerAutoSave]);
+  }, []);
+
+  // UX-38: Save when input loses focus
+  const handleEditBlur = useCallback((id: string) => {
+    setEditValues(prev => {
+      saveEdit(id, prev);
+      return prev;
+    });
+  }, [saveEdit]);
 
   const cancelEdit = useCallback(() => {
     setEditingId(null);
+    setEditErrors({});
     setEditValues({});
-    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
   }, []);
 
   // Fix #2: Track newly added tickers to show loading spinner
@@ -355,6 +382,7 @@ export default function Holdings() {
   // Fix #6: Extract edit state checks into stable callbacks to reduce column dependency array
   const isEditing = useCallback((id: string) => editingId === id, [editingId]);
   const getEditValue = useCallback((field: string) => editValues[field] ?? '', [editValues]);
+  const getEditError = useCallback((field: string) => editErrors[field] ?? '', [editErrors]);
   const isSaving = useCallback((id: string) => savingIndicator === id, [savingIndicator]);
   const isFetchingPrice = useCallback((ticker: string) => fetchingPriceTickers.has(ticker), [fetchingPriceTickers]);
 
@@ -370,6 +398,7 @@ export default function Holdings() {
               className="w-20 rounded border border-gray-300 px-2 py-1 text-sm font-semibold uppercase"
               value={getEditValue('ticker')}
               onChange={e => handleEditChange('ticker', e.target.value, row.original.id)}
+              onBlur={() => handleEditBlur(row.original.id)}
             />
           );
         }
@@ -381,13 +410,18 @@ export default function Holdings() {
       header: 'Shares',
       cell: ({ row }) => {
         if (isEditing(row.original.id)) {
+          const hasError = !!getEditError('shares');
           return (
-            <input
-              type="number"
-              className="w-24 rounded border border-gray-300 px-2 py-1 text-sm text-right"
-              value={getEditValue('shares')}
-              onChange={e => handleEditChange('shares', e.target.value, row.original.id)}
-            />
+            <div>
+              <input
+                type="number"
+                className={`w-24 rounded border px-2 py-1 text-sm text-right ${hasError ? 'border-red-500' : 'border-gray-300'}`}
+                value={getEditValue('shares')}
+                onChange={e => handleEditChange('shares', e.target.value, row.original.id)}
+                onBlur={() => handleEditBlur(row.original.id)}
+              />
+              {hasError && <p className="text-[10px] text-red-500 mt-0.5">{getEditError('shares')}</p>}
+            </div>
           );
         }
         return <span className="text-right block tabular-nums">{row.original.shares}</span>;
@@ -398,14 +432,19 @@ export default function Holdings() {
       header: 'Buy Price',
       cell: ({ row }) => {
         if (isEditing(row.original.id)) {
+          const hasError = !!getEditError('buy_price');
           return (
-            <input
-              type="number"
-              step="0.01"
-              className="w-28 rounded border border-gray-300 px-2 py-1 text-sm text-right"
-              value={getEditValue('buy_price')}
-              onChange={e => handleEditChange('buy_price', e.target.value, row.original.id)}
-            />
+            <div>
+              <input
+                type="number"
+                step="0.01"
+                className={`w-28 rounded border px-2 py-1 text-sm text-right ${hasError ? 'border-red-500' : 'border-gray-300'}`}
+                value={getEditValue('buy_price')}
+                onChange={e => handleEditChange('buy_price', e.target.value, row.original.id)}
+                onBlur={() => handleEditBlur(row.original.id)}
+              />
+              {hasError && <p className="text-[10px] text-red-500 mt-0.5">{getEditError('buy_price')}</p>}
+            </div>
           );
         }
         return <span className="text-right block tabular-nums">{formatCurrency(row.original.buy_price)}</span>;
@@ -491,6 +530,7 @@ export default function Holdings() {
               className="w-32 rounded border border-gray-300 px-2 py-1 text-sm"
               value={getEditValue('notes')}
               onChange={e => handleEditChange('notes', e.target.value, row.original.id)}
+              onBlur={() => handleEditBlur(row.original.id)}
               placeholder="Add note..."
             />
           );
@@ -534,7 +574,12 @@ export default function Holdings() {
                 </svg>
               </button>
               {singleTickerPopover === row.original.ticker && (
-                <div className="absolute right-0 top-full z-30 mt-1 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg">
+                <div
+                  className="absolute right-0 top-full z-30 mt-1 w-64 rounded-lg border border-gray-200 bg-white p-3 shadow-lg"
+                  role="dialog"
+                  aria-label={`Analyze ${row.original.ticker}`}
+                  onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setSingleTickerPopover(null); } }}
+                >
                   <p className="text-xs font-semibold text-gray-900 mb-2">Analyze {row.original.ticker}</p>
                   {/* Fix #4: Use singleTickerDepth state */}
                   <DepthSelector value={singleTickerDepth} onChange={setSingleTickerDepth} compact />
@@ -542,6 +587,7 @@ export default function Holdings() {
                     onClick={() => handleStartAnalysis('single', row.original.ticker, singleTickerDepth)}
                     disabled={analysisMutation.isPending}
                     className="mt-2 w-full rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
+                    autoFocus
                   >
                     {analysisMutation.isPending ? 'Starting...' : 'Start Analysis'}
                   </button>
@@ -554,7 +600,7 @@ export default function Holdings() {
         );
       },
     },
-  ], [isEditing, getEditValue, isSaving, isFetchingPrice, handleEditChange, cancelEdit, startEdit, handleStartAnalysis, analysisMutation.isPending, singleTickerPopover, singleTickerDepth]);
+  ], [isEditing, getEditValue, getEditError, isSaving, isFetchingPrice, handleEditChange, handleEditBlur, cancelEdit, startEdit, handleStartAnalysis, analysisMutation.isPending, singleTickerPopover, singleTickerDepth]);
 
   const table = useReactTable({
     data: holdings ?? [],
@@ -746,7 +792,62 @@ export default function Holdings() {
         </>
       ) : (
         <>
-          <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+          {/* UX-37: Mobile card layout (<768px) */}
+          <div className="md:hidden space-y-3">
+            {table.getRowModel().rows.map(row => {
+              const h = row.original;
+              const pnlVal = h.pnl;
+              return (
+                <div key={row.id} className="rounded-xl border border-gray-200 bg-white p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-gray-900">{h.ticker}</span>
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => setSingleTickerPopover(prev => prev === h.ticker ? null : h.ticker)}
+                        disabled={analysisMutation.isPending}
+                        className="rounded px-1.5 py-1 text-xs font-medium text-emerald-600 hover:bg-emerald-50 disabled:opacity-50"
+                        title={`Analyze ${h.ticker}`}
+                      >
+                        Analyze
+                      </button>
+                      <button onClick={() => startEdit(h)} className="rounded px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50">Edit</button>
+                      <button onClick={() => setDeleteConfirmId(h.id)} className="rounded px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50">Delete</button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                    <div>
+                      <span className="text-xs text-gray-500">Shares</span>
+                      <p className="tabular-nums">{h.shares}</p>
+                    </div>
+                    <div>
+                      <span className="text-xs text-gray-500">Buy Price</span>
+                      <p className="tabular-nums">{formatCurrency(h.buy_price)}</p>
+                    </div>
+                    <div>
+                      <span className="text-xs text-gray-500">Current Price</span>
+                      <p className="tabular-nums">
+                        {h.current_price != null ? formatCurrency(h.current_price) : formatCurrency(h.buy_price)}
+                        {h.price_stale && <span className="ml-1 text-[10px] text-amber-600">stale</span>}
+                      </p>
+                    </div>
+                    <div>
+                      <span className="text-xs text-gray-500">P&L</span>
+                      {pnlVal != null ? (
+                        <p className={`tabular-nums font-medium ${pnlColor(pnlVal)}`}>
+                          {formatPnl(pnlVal)} ({formatPnlPercent(h.pnl_pct)})
+                        </p>
+                      ) : (
+                        <p className="text-gray-400">--</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Desktop table (hidden on mobile) */}
+          <div className="hidden md:block overflow-x-auto rounded-xl border border-gray-200 bg-white">
             <table className="min-w-full divide-y divide-gray-200">
               {/* Fix #7: aria-sort on sorted column headers, button elements for sort triggers */}
               <thead className="bg-gray-50">
@@ -802,11 +903,13 @@ export default function Holdings() {
                         {/* Ticker validation indicator (Item 11) */}
                         {tickerInput.length > 0 && !validatingTicker && tickerValidation && (
                           tickerValidation.valid ? (
-                            <svg className="h-4 w-4 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                            <svg className="h-4 w-4 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-label="Valid ticker">
+                              <title>Valid ticker symbol</title>
                               <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                             </svg>
                           ) : (
-                            <svg className="h-4 w-4 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                            <svg className="h-4 w-4 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-label="Invalid ticker">
+                              <title>Ticker not recognized</title>
                               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                             </svg>
                           )

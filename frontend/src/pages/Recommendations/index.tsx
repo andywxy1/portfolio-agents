@@ -208,16 +208,19 @@ export default function Recommendations() {
         onConfirm={() => {
           if (acceptConfirm) {
             const ticker = recommendations.find(r => r.id === acceptConfirm)?.ticker ?? '';
+
             updateMutation.mutate(
               { id: acceptConfirm, data: { status: 'accepted' } },
               {
                 onSuccess: () => {
                   toast.success(`${ticker} recommendation accepted`);
                   setAcceptConfirm(null);
+
                 },
                 onError: () => {
                   toast.error('Failed to accept recommendation');
                   setAcceptConfirm(null);
+
                 },
               }
             );
@@ -236,16 +239,19 @@ export default function Recommendations() {
         onConfirm={() => {
           if (dismissConfirm) {
             const ticker = recommendations.find(r => r.id === dismissConfirm)?.ticker ?? '';
+
             updateMutation.mutate(
               { id: dismissConfirm, data: { status: 'dismissed' } },
               {
                 onSuccess: () => {
                   toast.success(`${ticker} recommendation dismissed`);
                   setDismissConfirm(null);
+
                 },
                 onError: () => {
                   toast.error('Failed to dismiss recommendation');
                   setDismissConfirm(null);
+
                 },
               }
             );
@@ -316,7 +322,12 @@ function RecTableRow({
           ) : '--'}
         </td>
         <td className="px-4 py-3 text-sm text-gray-600">{formatRelativeTime(rec.created_at)}</td>
-        <td className="px-4 py-3"><RecommendationStatusBadge status={rec.status} /></td>
+        <td className="px-4 py-3">
+          <RecommendationStatusBadge status={rec.status} />
+          {rec.status === 'accepted' && (
+            <p className="mt-0.5 text-[10px] text-gray-400 leading-tight">Marked as planned action. No orders have been placed.</p>
+          )}
+        </td>
         <td className="px-4 py-3">
           <div className="flex gap-1">
             {rec.status === 'pending' && (
@@ -404,6 +415,10 @@ function RecMobileCard({
         </Link>
       </div>
 
+      {rec.status === 'accepted' && (
+        <p className="text-[10px] text-gray-400 leading-tight">Marked as planned action. No orders have been placed.</p>
+      )}
+
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
         <span className="capitalize">{rec.order_type.replace('_', ' ')}</span>
         <span>Qty: {rec.quantity}</span>
@@ -477,30 +492,7 @@ function RecMobileCard({
 // Helpers
 // ---------------------------------------------------------------------------
 
-function getWatchlist(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem('watchlist') ?? '[]');
-  } catch {
-    return [];
-  }
-}
-
-function toggleWatchlist(ticker: string): boolean {
-  const list = getWatchlist();
-  const idx = list.indexOf(ticker);
-  if (idx >= 0) {
-    list.splice(idx, 1);
-    localStorage.setItem('watchlist', JSON.stringify(list));
-    return false;
-  }
-  list.push(ticker);
-  localStorage.setItem('watchlist', JSON.stringify(list));
-  return true;
-}
-
 function SuggestionCard({ suggestion: s }: { suggestion: StockSuggestion }) {
-  const [isWatched, setIsWatched] = useState(() => getWatchlist().includes(s.ticker));
-  const toast = useToast();
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-5 space-y-3 hover:shadow-md transition-shadow">
@@ -528,20 +520,12 @@ function SuggestionCard({ suggestion: s }: { suggestion: StockSuggestion }) {
         {s.suggested_weight && <span>Suggested {formatPercent(s.suggested_weight)}</span>}
       </div>
 
-      <button
-        onClick={() => {
-          const added = toggleWatchlist(s.ticker);
-          setIsWatched(added);
-          toast.info(added ? `${s.ticker} added to watchlist` : `${s.ticker} removed from watchlist`);
-        }}
-        className={`w-full rounded-lg border py-2 text-sm font-medium transition-colors ${
-          isWatched
-            ? 'border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-            : 'border-gray-200 text-gray-700 hover:bg-gray-50'
-        }`}
+      <Link
+        to={`/analysis?ticker=${s.ticker}`}
+        className="block w-full rounded-lg border border-gray-200 py-2 text-center text-sm font-medium text-indigo-600 hover:bg-indigo-50 transition-colors"
       >
-        {isWatched ? 'Watching' : 'Watch'}
-      </button>
+        View Analysis
+      </Link>
     </div>
   );
 }

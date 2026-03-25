@@ -1,8 +1,9 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Outlet, useLocation, Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Sidebar } from './Sidebar';
 import { useActiveAnalysisJob } from '../hooks/useActiveAnalysis';
+import { apiClient } from '../api/client';
 
 // Fix #8: Breadcrumb label mapping
 const ROUTE_LABELS: Record<string, string> = {
@@ -26,6 +27,7 @@ function getBreadcrumbLabel(pathname: string): string {
 }
 
 export function Layout() {
+  const queryClient = useQueryClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const activeJobId = useActiveAnalysisJob();
@@ -34,11 +36,7 @@ export function Layout() {
   // Fix #9: Health check query - polls every 30s, shows banner on failure
   const healthQuery = useQuery<{ status: string }>({
     queryKey: ['health'],
-    queryFn: async () => {
-      const resp = await fetch('/api/health');
-      if (!resp.ok) throw new Error('Backend unreachable');
-      return resp.json();
-    },
+    queryFn: () => apiClient.get<{ status: string }>('/health'),
     refetchInterval: 30_000,
     retry: false,
     refetchOnWindowFocus: true,
@@ -122,6 +120,12 @@ export function Layout() {
             <p className="text-sm font-medium text-red-800">
               Cannot connect to server. Check that the backend is running.
             </p>
+            <button
+              onClick={() => queryClient.invalidateQueries({ queryKey: ['health'] })}
+              className="ml-2 flex-shrink-0 rounded-md bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-200 transition-colors"
+            >
+              Retry now
+            </button>
           </div>
         )}
 

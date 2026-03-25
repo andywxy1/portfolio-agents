@@ -23,7 +23,7 @@ import {
   ResponsiveContainer,
   Legend,
 } from 'recharts';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 
 const COLORS = [
   '#10b981', '#3b82f6', '#8b5cf6', '#f59e0b', '#ef4444',
@@ -285,12 +285,12 @@ export default function Dashboard() {
                 )}
 
                 {Array.isArray(latest?.recommendations) && latest.recommendations.length > 0 && (
-                  <div className="rounded-lg border border-gray-100 bg-gray-50 p-4">
+                  <Link to="/recommendations" className="block rounded-lg border border-gray-100 bg-gray-50 p-4 hover:bg-gray-100 transition-colors">
                     <p className="text-sm font-medium text-gray-900">Pending Recommendations</p>
                     <p className="mt-1 text-xs text-gray-500">
                       {latest.recommendations.filter(r => r.status === 'pending').length} actions awaiting review
                     </p>
-                  </div>
+                  </Link>
                 )}
 
                 {!latest?.job && !(Array.isArray(latest?.recommendations) && latest.recommendations.length > 0) && (

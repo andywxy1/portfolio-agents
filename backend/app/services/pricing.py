@@ -192,11 +192,15 @@ def _fetch_from_alpaca(ticker: str) -> dict | None:
         except Exception:
             logger.debug("Could not fetch daily bars for %s; change will be None", ticker)
 
+        # Reject zero/negative mid_price so it falls through to stale-cache fallback
+        if not mid_price or mid_price <= 0:
+            return None
+
         change = (mid_price - prev_close) if prev_close and mid_price else None
         change_pct = (change / prev_close * 100) if prev_close and change else None
 
         return {
-            "price": round(mid_price, 4) if mid_price else 0.0,
+            "price": round(mid_price, 4),
             "open": round(open_price, 4) if open_price else None,
             "high": round(high_price, 4) if high_price else None,
             "low": round(low_price, 4) if low_price else None,
@@ -320,19 +324,77 @@ def validate_ticker(ticker: str) -> dict:
 def get_prices_batch(db: Session, tickers: list[str]) -> dict[str, PriceDataResponse]:
     """Get prices for multiple tickers. Returns a dict keyed by ticker.
 
+    Uses Alpaca's multi-symbol support to fetch all quotes in a single
+    HTTP call where possible. Falls back to per-ticker fetching on error.
+
     Never raises. If a ticker price is unavailable, returns a response
     with price=None and stale=True.
     """
     results: dict[str, PriceDataResponse] = {}
+    tickers_needing_fetch: list[str] = []
+
+    # 1. Check cache first for all tickers
     for ticker in tickers:
+        upper = ticker.upper()
+        cached = _get_cached_price(db, upper)
+        if cached and _is_cache_fresh(cached):
+            results[upper] = _cache_entry_to_response(cached, stale=False)
+        else:
+            tickers_needing_fetch.append(upper)
+
+    # 2. Batch-fetch from Alpaca for all cache-miss tickers in one call
+    if tickers_needing_fetch and settings.alpaca_api_key and settings.alpaca_secret_key:
         try:
-            results[ticker.upper()] = get_price(db, ticker)
+            from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import StockLatestQuoteRequest
+
+            client = StockHistoricalDataClient(
+                api_key=settings.alpaca_api_key,
+                secret_key=settings.alpaca_secret_key,
+            )
+            quote_request = StockLatestQuoteRequest(
+                symbol_or_symbols=tickers_needing_fetch
+            )
+            quotes = client.get_stock_latest_quote(quote_request)
+
+            fetched_tickers: set[str] = set()
+            for sym in tickers_needing_fetch:
+                if sym in quotes:
+                    quote = quotes[sym]
+                    mid_price = (
+                        (quote.ask_price + quote.bid_price) / 2
+                        if quote.ask_price and quote.bid_price
+                        else quote.ask_price or quote.bid_price
+                    )
+                    if mid_price and mid_price > 0:
+                        price_data = {
+                            "price": round(mid_price, 4),
+                            "market_status": _get_market_status(),
+                        }
+                        entry = _store_cache(db, sym, price_data)
+                        results[sym] = _cache_entry_to_response(entry, stale=False)
+                        fetched_tickers.add(sym)
+
+            # Any tickers not returned by the batch call fall through below
+            tickers_needing_fetch = [
+                t for t in tickers_needing_fetch if t not in fetched_tickers
+            ]
+        except Exception:
+            logger.warning(
+                "Batch Alpaca fetch failed; falling back to per-ticker fetch"
+            )
+
+    # 3. Fall back to per-ticker fetch for remaining tickers
+    for ticker in tickers_needing_fetch:
+        try:
+            results[ticker] = get_price(db, ticker)
         except Exception:
             logger.warning("Could not fetch price for %s", ticker)
-            results[ticker.upper()] = PriceDataResponse(
-                ticker=ticker.upper(),
+            results[ticker] = PriceDataResponse(
+                ticker=ticker,
                 price=None,
                 fetched_at=None,
                 stale=True,
             )
+
     return results
