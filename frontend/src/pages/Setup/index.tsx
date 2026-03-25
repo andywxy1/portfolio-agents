@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useConfig, useUpdateConfig, useValidateConfig } from '../../api/hooks';
+import { useConfig, useUpdateConfig, useValidateConfig, useConfigStatus } from '../../api/hooks';
+import { useToast } from '../../components/Toast';
 import type { AppConfig, ValidationResult } from '../../types';
 
 // ---------------------------------------------------------------------------
@@ -33,9 +34,14 @@ const DEFAULT_CONFIG: Partial<AppConfig> = {
 
 export default function Setup() {
   const navigate = useNavigate();
+  const toast = useToast();
+  const { data: configStatus } = useConfigStatus();
   const { data: existingConfig } = useConfig();
   const updateConfig = useUpdateConfig();
   const validateConfigMutation = useValidateConfig();
+
+  // Settings mode: user is already configured and is editing settings
+  const settingsMode = configStatus?.configured === true;
 
   const [step, setStep] = useState(0);
   const [form, setForm] = useState<Partial<AppConfig>>(() => ({
@@ -46,6 +52,13 @@ export default function Setup() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showPasswords, setShowPasswords] = useState<Record<string, boolean>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Settings mode: track which sections are expanded
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
+    alpaca: true,
+    llm: true,
+    advanced: false,
+  });
 
   // Track which fields the user has actually changed (Fix 5)
   const changedFieldsRef = useRef<Set<string>>(new Set());
@@ -71,6 +84,10 @@ export default function Setup() {
     setShowPasswords((prev) => ({ ...prev, [field]: !prev[field] }));
   }, []);
 
+  const toggleSection = useCallback((section: string) => {
+    setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }));
+  }, []);
+
   const handleTestAlpaca = useCallback(async () => {
     setValidation(null);
     const result = await validateConfigMutation.mutateAsync({
@@ -91,31 +108,49 @@ export default function Setup() {
     setValidation(result);
   }, [form.llm_base_url, form.llm_api_key, form.llm_quick_model, validateConfigMutation]);
 
+  const buildPayload = useCallback(() => {
+    const payload: Partial<AppConfig> = {};
+    const changed = changedFieldsRef.current;
+    if (changed.size === 0) {
+      for (const [k, v] of Object.entries(form)) {
+        if (typeof v === 'string' && v.includes('****')) continue;
+        (payload as Record<string, unknown>)[k] = v;
+      }
+    } else {
+      for (const key of changed) {
+        const val = form[key as keyof AppConfig];
+        if (typeof val === 'string' && val.includes('****')) continue;
+        (payload as Record<string, unknown>)[key] = val;
+      }
+    }
+    return payload;
+  }, [form]);
+
+  // Save for onboarding wizard mode (navigates to Done step)
   const handleSave = useCallback(async () => {
     setSaveError(null);
     try {
-      // Only send fields the user actually changed - avoid sending masked "****" values (Fix 5)
-      const payload: Partial<AppConfig> = {};
-      const changed = changedFieldsRef.current;
-      if (changed.size === 0) {
-        // If nothing changed but we're on initial setup, send all non-masked fields
-        for (const [k, v] of Object.entries(form)) {
-          if (typeof v === 'string' && v.includes('****')) continue;
-          (payload as Record<string, unknown>)[k] = v;
-        }
-      } else {
-        for (const key of changed) {
-          const val = form[key as keyof AppConfig];
-          if (typeof val === 'string' && val.includes('****')) continue;
-          (payload as Record<string, unknown>)[key] = val;
-        }
-      }
+      const payload = buildPayload();
       await updateConfig.mutateAsync(payload);
       setStep(STEPS.length - 1);
     } catch (err: any) {
       setSaveError(err?.message ?? 'Failed to save configuration');
     }
-  }, [form, updateConfig]);
+  }, [buildPayload, updateConfig]);
+
+  // Save for settings mode (stays on page, shows toast)
+  const handleSettingsSave = useCallback(async () => {
+    setSaveError(null);
+    try {
+      const payload = buildPayload();
+      await updateConfig.mutateAsync(payload);
+      toast.success('Settings saved successfully');
+      changedFieldsRef.current.clear();
+    } catch (err: any) {
+      setSaveError(err?.message ?? 'Failed to save configuration');
+      toast.error(err?.message ?? 'Failed to save configuration');
+    }
+  }, [buildPayload, updateConfig, toast]);
 
   const handleLaunch = useCallback(() => {
     navigate('/');
@@ -135,6 +170,115 @@ export default function Setup() {
     setStep((s) => Math.max(s - 1, 0));
   };
 
+  // ---------------------------------------------------------------------------
+  // Settings Mode: single-page layout with collapsible cards
+  // ---------------------------------------------------------------------------
+  if (settingsMode) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 px-4 py-12">
+        {/* Back button */}
+        <button
+          type="button"
+          onClick={() => navigate('/')}
+          className="fixed left-4 top-4 z-50 flex items-center gap-2 rounded-lg bg-slate-800/90 px-4 py-2.5 text-sm font-medium text-slate-300 shadow-lg backdrop-blur transition-colors hover:bg-slate-700 hover:text-white"
+        >
+          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
+          </svg>
+          Back to Dashboard
+        </button>
+
+        <div className="w-full max-w-xl">
+          {/* Header */}
+          <div className="mb-6 text-center">
+            <h1 className="text-2xl font-bold text-white">Settings</h1>
+            <p className="mt-1 text-sm text-slate-400">Manage your connections and analysis configuration.</p>
+          </div>
+
+          {/* Alpaca Section */}
+          <CollapsibleCard
+            title="Alpaca API Keys"
+            subtitle="Brokerage connection"
+            expanded={expandedSections.alpaca}
+            onToggle={() => toggleSection('alpaca')}
+          >
+            <AlpacaStep
+              form={form}
+              updateField={updateField}
+              showPasswords={showPasswords}
+              togglePassword={togglePassword}
+              onTest={handleTestAlpaca}
+              testing={validateConfigMutation.isPending}
+              validation={validation}
+            />
+          </CollapsibleCard>
+
+          {/* LLM Section */}
+          <CollapsibleCard
+            title="LLM Configuration"
+            subtitle="AI model settings"
+            expanded={expandedSections.llm}
+            onToggle={() => toggleSection('llm')}
+          >
+            <LLMStep
+              form={form}
+              updateField={updateField}
+              showPasswords={showPasswords}
+              togglePassword={togglePassword}
+              onTest={handleTestLLM}
+              testing={validateConfigMutation.isPending}
+              validation={validation}
+            />
+          </CollapsibleCard>
+
+          {/* Advanced Section */}
+          <CollapsibleCard
+            title="Advanced Settings"
+            subtitle="Thresholds and API key"
+            expanded={expandedSections.advanced}
+            onToggle={() => toggleSection('advanced')}
+          >
+            <AdvancedStep
+              form={form}
+              updateField={updateField}
+              showPasswords={showPasswords}
+              togglePassword={togglePassword}
+              showAdvanced={true}
+              setShowAdvanced={() => {}}
+            />
+          </CollapsibleCard>
+
+          {/* Save / Back footer */}
+          <div className="mt-6 flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => navigate('/')}
+              className="rounded-lg px-4 py-2 text-sm font-medium text-slate-400 transition-colors hover:text-white"
+            >
+              Back to Dashboard
+            </button>
+
+            {saveError && (
+              <p className="text-sm text-red-400">{saveError}</p>
+            )}
+
+            <button
+              type="button"
+              onClick={handleSettingsSave}
+              disabled={updateConfig.isPending}
+              className="rounded-lg bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-emerald-500/20 transition-all hover:bg-emerald-500 disabled:opacity-50"
+            >
+              {updateConfig.isPending ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Onboarding Mode: multi-step wizard (original behavior)
+  // ---------------------------------------------------------------------------
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 px-4 py-12">
       <div className="w-full max-w-xl">
@@ -252,6 +396,53 @@ export default function Setup() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Collapsible Card (settings mode)
+// ---------------------------------------------------------------------------
+
+function CollapsibleCard({
+  title,
+  subtitle,
+  expanded,
+  onToggle,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mb-4 rounded-2xl border border-slate-700/50 bg-slate-800/80 shadow-xl backdrop-blur">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between px-6 py-4 text-left"
+      >
+        <div>
+          <h2 className="text-base font-semibold text-white">{title}</h2>
+          <p className="text-xs text-slate-500">{subtitle}</p>
+        </div>
+        <svg
+          className={`h-5 w-5 text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+        </svg>
+      </button>
+      {expanded && (
+        <div className="border-t border-slate-700/50 px-6 pb-6 pt-4">
+          {children}
+        </div>
+      )}
     </div>
   );
 }
@@ -500,7 +691,7 @@ function AdvancedStep({
 
       {!showAdvanced && (
         <p className="text-sm text-slate-500">
-          Defaults: Heavy {'>'}= {form.weight_heavy_threshold ?? 10}%, Medium {'>'}={' '}
+          Defaults: Heavy {'>'} = {form.weight_heavy_threshold ?? 10}%, Medium {'>'}={' '}
           {form.weight_medium_threshold ?? 3}%
         </p>
       )}
