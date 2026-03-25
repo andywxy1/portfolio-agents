@@ -627,37 +627,46 @@ function ReportsPanel({
 // =============================================================================
 
 export default function AnalysisLive() {
-  usePageTitle('Live Analysis');
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
   const toast = useToast();
   const queryClient = useQueryClient();
   const cancelMutation = useCancelAnalysis();
 
-  // SSE stream
+  // Fetch job status first so we know whether to connect SSE
+  const { data: job, isLoading: jobLoading, isError: jobError } = useAnalysisJob(jobId);
+
+  // Determine if the job is already in a terminal state
+  const isJobTerminal = job?.status === 'completed' || job?.status === 'failed' || job?.status === 'cancelled';
+
+  usePageTitle(isJobTerminal ? 'Analysis Results' : 'Live Analysis');
+
+  // SSE stream - skip connection if job is already terminal or still loading
+  // Wait for job data before attempting SSE to avoid a brief 404 connection attempt
+  const sseEnabled = !jobLoading && !isJobTerminal;
   const {
     eventsByTicker,
     stagesByTicker,
+    setStagesByTicker,
     reportsByTicker,
     setReportsByTicker,
     decisions,
     setDecisions,
     isConnected,
     isComplete,
+    setIsComplete,
     connectionError,
+    setConnectionError,
     jobProgress,
     tickers: streamTickers,
     tickerDepths,
     activeTickers: concurrentTickers,
     overallDepth,
     reconnect,
-  } = useAnalysisStream(jobId);
+  } = useAnalysisStream(jobId, { enabled: sseEnabled });
 
   // Messages ticker filter
   const [messageTickerFilter, setMessageTickerFilter] = useState<string>('_all');
-
-  // Fallback polling for job status
-  const { data: job, isLoading: jobLoading, isError: jobError } = useAnalysisJob(jobId);
 
   // Merge tickers from job + stream
   const allTickers = useMemo(() => {
@@ -666,6 +675,111 @@ export default function AnalysisLive() {
     streamTickers.forEach(t => { if (t !== '_all') set.add(t); });
     return [...set];
   }, [job?.tickers, streamTickers]);
+
+  // When the job is already terminal (completed/failed/cancelled), populate
+  // reports, decisions, and stages from the job data instead of SSE events.
+  const hydratedTerminalJob = useRef(false);
+  useEffect(() => {
+    if (!isJobTerminal || !job || !jobId || hydratedTerminalJob.current) return;
+    hydratedTerminalJob.current = true;
+
+    // Mark stream as complete so UI shows "Done" not "Offline"
+    setIsComplete(true);
+    // Clear any stale connection error (e.g. "stream no longer available")
+    setConnectionError(null);
+
+    // Set all agents to completed/failed based on job status
+    const agentStatus: AgentStatus = job.status === 'completed' ? 'completed' : 'failed';
+    const tickersToHydrate = job.tickers ?? [];
+    const stagesMap = new Map<string, Map<string, AgentStatus>>();
+    for (const ticker of tickersToHydrate) {
+      const agentStages = new Map<string, AgentStatus>();
+      for (const def of AGENT_PIPELINE) {
+        agentStages.set(def.agent, agentStatus);
+      }
+      stagesMap.set(ticker, agentStages);
+    }
+    // Also set a fallback _all entry
+    const allAgentStages = new Map<string, AgentStatus>();
+    for (const def of AGENT_PIPELINE) {
+      allAgentStages.set(def.agent, agentStatus);
+    }
+    stagesMap.set('_all', allAgentStages);
+    setStagesByTicker(stagesMap);
+
+    // Fetch full position analyses from the job endpoint
+    apiClient.get<AnalysisJob & { position_analyses?: PositionAnalysis[] }>(`/analysis/jobs/${jobId}`).then((data) => {
+      if (!data?.position_analyses?.length) return;
+
+      const fullReports = new Map<string, Map<string, string>>();
+      const newDecisions = new Map<string, DecisionInfo>();
+
+      for (const pa of data.position_analyses) {
+        const tickerReports = new Map<string, string>();
+
+        // Simple report fields
+        for (const [dbField, tabKey] of DB_SIMPLE_REPORT_FIELDS) {
+          const val = (pa as unknown as Record<string, unknown>)[dbField];
+          if (val) {
+            tickerReports.set(tabKey, extractReportText(val));
+          }
+        }
+
+        // Structured debate fields
+        if (pa.investment_debate) {
+          tickerReports.set('debate', extractReportText(pa.investment_debate));
+        }
+        if (pa.risk_debate) {
+          tickerReports.set('risk', extractReportText(pa.risk_debate));
+        }
+
+        // Decision / trade_decision
+        if (pa.raw_decision) {
+          tickerReports.set('decision', pa.raw_decision);
+          if (pa.signal) {
+            newDecisions.set(pa.ticker, {
+              ticker: pa.ticker,
+              signal: pa.signal,
+              confidence: 0.5,
+              summary: pa.raw_decision,
+            });
+          }
+        }
+
+        // Per-ticker agent status from position analysis
+        if (pa.status === 'completed' || pa.status === 'failed') {
+          const paAgentStatus: AgentStatus = pa.status === 'completed' ? 'completed' : 'failed';
+          const paStages = new Map<string, AgentStatus>();
+          for (const def of AGENT_PIPELINE) {
+            paStages.set(def.agent, paAgentStatus);
+          }
+          stagesMap.set(pa.ticker, paStages);
+        }
+
+        if (tickerReports.size > 0) {
+          fullReports.set(pa.ticker, tickerReports);
+        }
+      }
+
+      if (fullReports.size > 0) {
+        setReportsByTicker(fullReports);
+      }
+      if (newDecisions.size > 0) {
+        setDecisions(newDecisions);
+      }
+      // Update stages with per-ticker status
+      setStagesByTicker(new Map(stagesMap));
+    }).catch((err) => {
+      console.warn('Failed to fetch reports for completed job:', err);
+    });
+
+    // Invalidate stale queries
+    queryClient.invalidateQueries({ queryKey: ['analysis'] });
+    queryClient.invalidateQueries({ queryKey: ['recommendations'] });
+    queryClient.invalidateQueries({ queryKey: ['suggestions'] });
+    queryClient.invalidateQueries({ queryKey: ['position-analyses'] });
+    queryClient.invalidateQueries({ queryKey: ['portfolio-summary'] });
+  }, [isJobTerminal, job, jobId, setIsComplete, setConnectionError, setStagesByTicker, setReportsByTicker, setDecisions, queryClient]);
 
   // Fix #15: Fetch real price data for sparkline using batch prices hook
   const { data: batchPrices } = useBatchPrices(allTickers, allTickers.length > 0);
@@ -907,7 +1021,7 @@ export default function AnalysisLive() {
       <div className="-m-4 sm:-m-6 bg-gray-950 flex items-center justify-center flex-1 min-h-0 overflow-hidden">
         <div className="flex flex-col items-center gap-4">
           <div className="h-12 w-12 animate-spin rounded-full border-4 border-gray-700 border-t-blue-500" />
-          <p className="text-sm text-gray-400">Connecting to analysis stream...</p>
+          <p className="text-sm text-gray-400">Loading analysis...</p>
         </div>
       </div>
     );
@@ -951,7 +1065,11 @@ export default function AnalysisLive() {
           {/* Title + progress */}
           <div className="flex items-center gap-3 flex-1 min-w-0">
             <h1 className="text-sm font-semibold text-gray-200 whitespace-nowrap">
-              Live Analysis
+              {isJobTerminal
+                ? job?.status === 'completed' ? 'Analysis Results'
+                : job?.status === 'failed' ? 'Analysis Failed'
+                : 'Analysis Cancelled'
+                : 'Live Analysis'}
               {overallDepth && (
                 <span className="ml-1.5 text-xs font-normal text-gray-500">
                   {' '}&mdash; {overallDepth.charAt(0).toUpperCase() + overallDepth.slice(1)} Depth
@@ -960,7 +1078,7 @@ export default function AnalysisLive() {
             </h1>
             {totalTickers > 0 && (
               <div className="flex items-center gap-2 text-xs text-gray-500">
-                <span>Analyzing {completedTickers}/{totalTickers} positions</span>
+                <span>{isJobTerminal ? 'Analyzed' : 'Analyzing'} {completedTickers}/{totalTickers} positions</span>
                 <div className="w-24 h-1.5 bg-gray-800 rounded-full overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all duration-500 ${
@@ -1088,8 +1206,31 @@ export default function AnalysisLive() {
           </div>
         )}
 
-        {/* Connection error banner */}
-        {connectionError && (
+        {/* Status banner for terminal jobs */}
+        {isJobTerminal && job?.status === 'completed' && (
+          <div className="mt-2 text-xs text-emerald-400 bg-emerald-950/30 rounded px-2 py-1 flex items-center gap-2">
+            <span>Analysis completed{job.completed_at ? ` on ${new Date(job.completed_at).toLocaleString()}` : ''}</span>
+            <button
+              onClick={() => navigate('/analysis')}
+              className="flex-shrink-0 rounded bg-emerald-800/60 px-2 py-0.5 text-xs font-medium text-emerald-200 hover:bg-emerald-700/60 transition-colors"
+            >
+              View Full Results
+            </button>
+          </div>
+        )}
+        {isJobTerminal && job?.status === 'failed' && (
+          <div className="mt-2 text-xs text-red-400 bg-red-950/30 rounded px-2 py-1 flex items-center gap-2">
+            <span>Analysis failed{job.error_message ? `: ${job.error_message}` : ''}</span>
+          </div>
+        )}
+        {isJobTerminal && job?.status === 'cancelled' && (
+          <div className="mt-2 text-xs text-amber-400 bg-amber-950/30 rounded px-2 py-1 flex items-center gap-2">
+            <span>Analysis was cancelled</span>
+          </div>
+        )}
+
+        {/* Connection error banner - only show for non-terminal jobs */}
+        {connectionError && !isJobTerminal && (
           <div className="mt-2 text-xs text-amber-400 bg-amber-950/30 rounded px-2 py-1 flex items-center gap-2">
             <span>{connectionError}</span>
             <button

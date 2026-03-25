@@ -125,7 +125,8 @@ export function getAgentIcon(agent: string): string {
 // Hook
 // ---------------------------------------------------------------------------
 
-export function useAnalysisStream(jobId: string | undefined) {
+export function useAnalysisStream(jobId: string | undefined, options?: { enabled?: boolean }) {
+  const enabled = options?.enabled ?? true;
   const [eventsByTicker, setEventsByTicker] = useState<Map<string, StreamEvent[]>>(new Map());
   const [stagesByTicker, setStagesByTicker] = useState<Map<string, Map<string, AgentStatus>>>(new Map());
   const [reportsByTicker, setReportsByTicker] = useState<Map<string, Map<string, string>>>(new Map());
@@ -200,7 +201,7 @@ export function useAnalysisStream(jobId: string | undefined) {
   }, []);
 
   useEffect(() => {
-    if (!jobId) return;
+    if (!jobId || !enabled) return;
 
     // Reset done flag for new job connections
     doneRef.current = false;
@@ -475,18 +476,21 @@ export function useAnalysisStream(jobId: string | undefined) {
     return () => {
       esRef.current?.close();
     };
-  }, [jobId, addEvent, nextEventId, setStage, addReport, reconnectCounter]);
+  }, [jobId, enabled, addEvent, nextEventId, setStage, addReport, reconnectCounter]);
 
   return {
     eventsByTicker,
     stagesByTicker,
+    setStagesByTicker,
     reportsByTicker,
     setReportsByTicker,
     decisions,
     setDecisions,
     isConnected,
     isComplete,
+    setIsComplete,
     connectionError,
+    setConnectionError,
     jobProgress,
     tickers,
     tickerDepths,
